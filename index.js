@@ -581,32 +581,47 @@ client.on("interactionCreate", async (i) => {
       try {
         const ticketName = `oleng-${orderId}`.toLowerCase();
         ticket = await guild.channels.create({
-          name: ticketName,
-          type: ChannelType.GuildText,
-          parent: TICKET_CATEGORY_ID,
-          topic: `OLENG BEACH | ${orderId} | User: ${user.id} | Roblox: ${robloxUsername}`,
-          permissionOverwrites: [
-            { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-            {
-              id: user.id,
-              allow: [
-                PermissionsBitField.Flags.ViewChannel,
-                PermissionsBitField.Flags.SendMessages,
-                PermissionsBitField.Flags.ReadMessageHistory,
-                PermissionsBitField.Flags.AttachFiles,
-              ],
-            },
-            {
-              id: STAFF_ROLE_ID,
-              allow: [
-                PermissionsBitField.Flags.ViewChannel,
-                PermissionsBitField.Flags.SendMessages,
-                PermissionsBitField.Flags.ReadMessageHistory,
-                PermissionsBitField.Flags.ManageMessages,
-              ],
-            },
-          ],
-        });
+  name: ticketName,
+  type: ChannelType.GuildText,
+  parent: TICKET_CATEGORY_ID,
+  topic: `OLENG BEACH | ${orderId} | User: ${user.id} | Roblox: ${robloxUsername}`,
+  permissionOverwrites: [
+    { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+
+    // ✅ WAJIB: izin untuk BOT biar bisa kirim pesan ke ticket
+    {
+      id: client.user.id,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.ManageChannels,
+        PermissionsBitField.Flags.ManageMessages,
+        PermissionsBitField.Flags.AttachFiles,
+        PermissionsBitField.Flags.EmbedLinks,
+      ],
+    },
+
+    {
+      id: user.id,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.AttachFiles,
+      ],
+    },
+    {
+      id: STAFF_ROLE_ID,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.ManageMessages,
+      ],
+    },
+  ],
+});
       } catch (e) {
         console.error("Ticket create error:", e);
         return i.editReply(
