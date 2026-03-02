@@ -34,6 +34,7 @@ import {
   TextInputBuilder,
   TextInputStyle,
   EmbedBuilder,
+  StringSelectMenuBuilder,
 } from "discord.js";
 
 // ========= CONFIG =========
@@ -117,6 +118,33 @@ function isStaff(member) {
 function computeTotal(qty) {
   const blocks = qty / 1000;
   return Math.round(blocks * PRICE_PER_1000);
+}
+
+// ========= STOCK STORAGE =========
+const STOCK_FILE = path.resolve("./stock.json");
+let stockState = {
+  status: "READY", // READY | HABIS
+  updatedAt: null,
+  updatedBy: null,
+};
+
+function loadStock() {
+  try {
+    if (!fs.existsSync(STOCK_FILE)) return;
+    const raw = fs.readFileSync(STOCK_FILE, "utf-8");
+    const json = JSON.parse(raw);
+    if (json?.status) stockState = { ...stockState, ...json };
+  } catch (e) {
+    console.error("Failed to load stock.json:", e);
+  }
+}
+
+function saveStock() {
+  try {
+    fs.writeFileSync(STOCK_FILE, JSON.stringify(stockState, null, 2));
+  } catch (e) {
+    console.error("Failed to save stock.json:", e);
+  }
 }
 
 // ========= ROBLOX HELPERS =========
@@ -260,15 +288,76 @@ function buildPanelEmbed() {
     .setFooter({ text: "OLENG BEACH Order Robux System" });
 }
 
+function buildStockStatusButton() {
+  const isReady = stockState.status === "READY";
+  return new ButtonBuilder()
+    .setCustomId("ob_stock_info")
+    .setLabel(isReady ? "📦 STOCK: READY" : "⛔ STOCK: HABIS")
+    .setStyle(isReady ? ButtonStyle.Primary : ButtonStyle.Danger)
+    .setDisabled(true);
+}
+
+function buildStockControlDropdown() {
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId("ob_stock_set")
+      .setPlaceholder("Staff/Owner: Ubah Status Stock")
+      .addOptions(
+        {
+          label: "Stock Ready",
+          value: "READY",
+          description: "Tampilkan READY (biru)"
+        },
+        {
+          label: "Stock Habis",
+          value: "HABIS",
+          description: "Tampilkan HABIS (merah)"
+        }
+      )
+  );
+}
+
 function buildPanelComponents() {
+  const isReady = stockState.status === "READY";
+
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId("ob_order_open_modal")
         .setLabel("💸ORDER ROBUX")
         .setStyle(ButtonStyle.Success)
+        .setDisabled(!isReady), // ✅ disable kalau stock HABIS
+      buildStockStatusButton()
     ),
+    buildStockControlDropdown()
   ];
+}
+
+async function refreshPanelMessage(client) {
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const channel = await guild.channels.fetch(PANEL_CHANNEL_ID);
+
+    if (!channel || channel.type !== ChannelType.GuildText) return;
+
+    const embed = buildPanelEmbed();
+    const components = buildPanelComponents();
+
+    const msgs = await channel.messages.fetch({ limit: 20 });
+    const existing = msgs.find(
+      (m) =>
+        m.author.id === client.user.id &&
+        m.embeds?.[0]?.title?.includes("ORDER ROBUX")
+    );
+
+    if (existing) {
+      await existing.edit({ embeds: [embed], components });
+    } else {
+      await channel.send({ embeds: [embed], components });
+    }
+  } catch (e) {
+    console.error("refreshPanelMessage error:", e);
+  }
 }
 
 function buildOrderModal() {
@@ -480,6 +569,7 @@ async function runAutoCloseSweep(client) {
 
 // ========= DISCORD CLIENT =========
 loadOrders();
+loadStock();
 
 const client = new Client({
   intents: [
@@ -497,34 +587,9 @@ client.once("ready", async () => {
   // Auto-close sweep loop
   setInterval(() => runAutoCloseSweep(client), 60 * 1000).unref();
 
-  // Post/refresh panel
-  try {
-    const guild = await client.guilds.fetch(GUILD_ID);
-    const channel = await guild.channels.fetch(PANEL_CHANNEL_ID);
-
-    if (!channel || channel.type !== ChannelType.GuildText) {
-      console.error("PANEL_CHANNEL_ID is not a text channel");
-      return;
-    }
-
-    const embed = buildPanelEmbed();
-    const components = buildPanelComponents();
-
-    const msgs = await channel.messages.fetch({ limit: 20 });
-    const existing = msgs.find(
-      (m) => m.author.id === client.user.id && m.embeds?.[0]?.title?.includes("ORDER ROBUX")
-    );
-
-    if (existing) {
-      await existing.edit({ embeds: [embed], components });
-      console.log("Panel updated.");
-    } else {
-      await channel.send({ embeds: [embed], components });
-      console.log("Panel sent.");
-    }
-  } catch (e) {
-    console.error("Failed to send/update panel:", e);
-  }
+  // ✅ PANEL LOAD
+  await refreshPanelMessage(client);
+  console.log("Panel sent/updated.");
 });
 
 // Track activity + detect payment proof
@@ -577,10 +642,45 @@ client.on("messageCreate", async (msg) => {
 
 client.on("interactionCreate", async (i) => {
   try {
+    // Stock Select
+    if (i.isStringSelectMenu() && i.customId === "ob_stock_set") {
+  const member = await i.guild.members.fetch(i.user.id).catch(() => null);
+
+  if (!isStaff(member)) {
+    return i.reply({ content: "Khusus staff/owner.", ephemeral: true });
+  }
+
+  const next = i.values?.[0];
+
+  if (!["READY", "HABIS"].includes(next)) {
+    return i.reply({ content: "Pilihan tidak valid.", ephemeral: true });
+  }
+
+  stockState.status = next;
+  stockState.updatedAt = nowIso();
+  stockState.updatedBy = i.user.id;
+  saveStock();
+
+  await i.reply({
+    content: `✅ Stock diubah menjadi **${next}**.`,
+    ephemeral: true,
+  });
+
+  await refreshPanelMessage(client);
+  return;
+}
     // ORDER button -> modal
     if (i.isButton() && i.customId === "ob_order_open_modal") {
-      return i.showModal(buildOrderModal());
-    }
+
+  if (stockState.status !== "READY") {
+    return i.reply({
+      content: "⛔ Stock sedang HABIS. Silakan tunggu sampai stock READY.",
+      ephemeral: true
+    });
+  }
+
+  return i.showModal(buildOrderModal());
+}
 
     // Modal submit -> validate + create ticket (eligible/ineligible both)
     if (i.isModalSubmit() && i.customId === "ob_order_modal_submit") {
