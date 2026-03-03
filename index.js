@@ -249,12 +249,6 @@ function ensureDir(p) {
   if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
 }
 
-/**
- * Create invoice PDF and return absolute file path
- * @param {any} order
- * @param {any} staffUser
- * @returns {Promise<string>}
- */
 function createInvoicePdf(order, staffUser) {
   return new Promise((resolve, reject) => {
     try {
@@ -488,7 +482,6 @@ function buildCustomerStatusEmbed(order) {
     .setFooter({ text: "OLENG BEACH — Order System" });
 }
 
-// BEFORE DONE: Bank + Cancel + Copy Username
 function buildCustomerButtonsEligible(orderId) {
   return [
     new ActionRowBuilder().addComponents(
@@ -510,7 +503,6 @@ function buildCustomerButtonsEligible(orderId) {
   ];
 }
 
-// AFTER DONE: Close Ticket only (NO copy username here)
 function buildButtonsAfterDone(orderId) {
   return [
     new ActionRowBuilder().addComponents(
@@ -551,7 +543,6 @@ function buildSeaBankInstructions(order) {
     .setFooter({ text: "OLENG BEACH" });
 }
 
-// Button row for payment instruction: Copy Bank Number
 function buildPaymentButtons(orderId) {
   return [
     new ActionRowBuilder().addComponents(
@@ -559,6 +550,36 @@ function buildPaymentButtons(orderId) {
         .setCustomId(`ob_copy_bank:${orderId}`)
         .setLabel("📋 Copy No. Rekening")
         .setStyle(ButtonStyle.Secondary)
+    ),
+  ];
+}
+
+// ========= BROADCAST (SELECT CHANNEL) =========
+function buildStockReadyBroadcastEmbed() {
+  return new EmbedBuilder()
+    .setTitle("🚨 STOCK ROBUX SUDAH READY LAGI! 🚨")
+    .setDescription(
+      [
+        "🔥 **Kabar gembira!** Stock Robux **SUDAH READY** dan bisa order sekarang!",
+        "",
+        "✅ **Fast response**",
+        "✅ **Via Community Payout**",
+        `✅ **Wajib join komunitas minimal ${ELIGIBLE_DAYS} hari**`,
+        "",
+        "⚡ Jangan sampai kehabisan lagi — klik tombol di bawah untuk langsung order!",
+      ].join("\n")
+    )
+    .setFooter({ text: "OLENG BEACH — Stock Alert" });
+}
+
+function buildGoToPanelButtonRow() {
+  const panelUrl = `https://discord.com/channels/${GUILD_ID}/${PANEL_CHANNEL_ID}`;
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setLabel("✅ OKE MAU ORDER")
+        .setStyle(ButtonStyle.Link)
+        .setURL(panelUrl)
     ),
   ];
 }
@@ -659,10 +680,7 @@ client.once("ready", async () => {
           .setName("status")
           .setDescription("Pilih status stock")
           .setRequired(true)
-          .addChoices(
-            { name: "ready", value: "READY" },
-            { name: "habis", value: "HABIS" }
-          )
+          .addChoices({ name: "ready", value: "READY" }, { name: "habis", value: "HABIS" })
       )
       .toJSON(),
 
@@ -670,22 +688,35 @@ client.once("ready", async () => {
       .setName("proses")
       .setDescription("Staff: proses order")
       .addStringOption((option) =>
-        option
-          .setName("aksi")
-          .setDescription("Aksi proses")
-          .setRequired(true)
-          .addChoices({ name: "selesai", value: "SELESAI" })
+        option.setName("aksi").setDescription("Aksi proses").setRequired(true).addChoices({ name: "selesai", value: "SELESAI" })
       )
       .addStringOption((option) =>
+        option.setName("order").setDescription("Order ID (contoh: T-12345). Kosongkan jika jalankan di dalam ticket.").setRequired(false)
+      )
+      .toJSON(),
+
+    // ✅ /broadcast dengan pilih channel yang sudah ada di server
+    new SlashCommandBuilder()
+      .setName("broadcast")
+      .setDescription("Staff: broadcast info penting")
+      .addStringOption((option) =>
         option
-          .setName("order")
-          .setDescription("Order ID (contoh: T-12345). Kosongkan jika jalankan di dalam ticket.")
-          .setRequired(false)
+          .setName("tipe")
+          .setDescription("Tipe broadcast")
+          .setRequired(true)
+          .addChoices({ name: "stock ready", value: "STOCK_READY" })
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("channel")
+          .setDescription("Pilih channel tujuan broadcast")
+          .setRequired(true)
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
       )
       .toJSON(),
   ]);
 
-  console.log("Slash commands /stok & /proses registered.");
+  console.log("Slash commands /stok, /proses, /broadcast registered.");
   await refreshPanelMessage(client);
 });
 
@@ -711,7 +742,7 @@ client.on("messageCreate", async (msg) => {
         order.status = "PROOF_SUBMITTED";
         order.proofSubmittedAt = nowIso();
 
-        order.autoClosePaused = true; // pause inactivity after proof
+        order.autoClosePaused = true;
         touchActivity(order, "proof_image_submitted");
 
         orders.set(order.orderId, order);
@@ -732,6 +763,35 @@ client.on("messageCreate", async (msg) => {
 
 client.on("interactionCreate", async (i) => {
   try {
+    // ===== /BROADCAST =====
+    if (i.isChatInputCommand() && i.commandName === "broadcast") {
+      const member = await i.guild.members.fetch(i.user.id).catch(() => null);
+      if (!isStaff(member)) return i.reply({ content: "Khusus staff/owner.", ephemeral: true });
+
+      const tipe = i.options.getString("tipe");
+      const target = i.options.getChannel("channel");
+
+      if (tipe !== "STOCK_READY") return i.reply({ content: "Tipe broadcast tidak valid.", ephemeral: true });
+      if (!target || (target.type !== ChannelType.GuildText && target.type !== ChannelType.GuildAnnouncement)) {
+        return i.reply({ content: "Channel tidak valid (harus text/announcement).", ephemeral: true });
+      }
+
+      // Optional: auto set stock jadi READY + refresh panel
+      stockState.status = "READY";
+      stockState.updatedAt = nowIso();
+      stockState.updatedBy = i.user.id;
+      saveStock();
+      await refreshPanelMessage(client);
+
+      await target.send({
+        content: "📢 @everyone",
+        embeds: [buildStockReadyBroadcastEmbed()],
+        components: buildGoToPanelButtonRow(),
+      });
+
+      return i.reply({ content: `✅ Broadcast terkirim ke <#${target.id}>`, ephemeral: true });
+    }
+
     // ===== SLASH COMMAND STOCK =====
     if (i.isChatInputCommand() && i.commandName === "stok") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
@@ -782,7 +842,6 @@ client.on("interactionCreate", async (i) => {
         });
       }
 
-      // Wajib ada bukti (biar aman)
       if (order.status !== "PROOF_SUBMITTED" && order.status !== "AWAITING_PROOF") {
         return i.reply({ content: "Belum ada bukti pembayaran (gambar).", ephemeral: true });
       }
@@ -803,7 +862,6 @@ client.on("interactionCreate", async (i) => {
 
       await i.reply({ content: `✅ Proses selesai untuk **${order.orderId}**.`, ephemeral: true });
 
-      // Success message (NO Copy Username button here)
       await i.channel
         .send({
           content:
@@ -820,7 +878,6 @@ client.on("interactionCreate", async (i) => {
         })
         .catch(() => {});
 
-      // ===== Generate invoice PDF =====
       let pdfPath = null;
       try {
         pdfPath = await createInvoicePdf(order, i.user);
@@ -829,12 +886,12 @@ client.on("interactionCreate", async (i) => {
         const invoiceFile = new AttachmentBuilder(pdfPath, { name: fileName });
         const invoiceEmbed = buildInvoiceEmbed(order);
 
-        // 1) Send to invoice channel (try/catch separate)
+        // Send to invoice channel
         try {
           const guild = await client.guilds.fetch(GUILD_ID);
           const invCh = await guild.channels.fetch(INVOICE_CHANNEL_ID).catch(() => null);
 
-          if (invCh && invCh.type === ChannelType.GuildText) {
+          if (invCh && (invCh.type === ChannelType.GuildText || invCh.type === ChannelType.GuildAnnouncement)) {
             await invCh.send({
               content: `🧾 Invoice baru: **${order.orderId}** | Customer: <@${order.userId}> | Roblox: \`${order.robloxUsername}\``,
               embeds: [invoiceEmbed],
@@ -843,16 +900,14 @@ client.on("interactionCreate", async (i) => {
           }
         } catch (eInv) {
           console.error("Invoice channel send error:", eInv?.stack || eInv);
-          // jangan stop proses
         }
 
-        // 2) Send to ticket (tetap kirim)
+        // Send to ticket
         await i.channel.send({
           content: `🧾 Invoice untuk order **${order.orderId}** (silakan download PDF di bawah).`,
           embeds: [invoiceEmbed],
           files: [invoiceFile],
         });
-
       } catch (e) {
         console.error("Invoice generate/send error:", e?.stack || e);
         await i.channel
@@ -1024,7 +1079,6 @@ client.on("interactionCreate", async (i) => {
         return i.reply({ content: "Tombol ini hanya valid di ticket ini.", ephemeral: true });
     }
 
-    // COPY USERNAME
     if (key === "ob_copy_username") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
       const allowed = i.user.id === order.userId || isStaff(member);
@@ -1036,7 +1090,6 @@ client.on("interactionCreate", async (i) => {
       });
     }
 
-    // COPY BANK NUMBER (SEABANK_ACCOUNT)
     if (key === "ob_copy_bank") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
       const allowed = i.user.id === order.userId || isStaff(member);
@@ -1048,7 +1101,6 @@ client.on("interactionCreate", async (i) => {
       });
     }
 
-    // BANK TRANSFER
     if (key === "ob_bank") {
       if (!order.robloxEligible) return i.reply({ content: "Order ini tidak eligible.", ephemeral: true });
 
@@ -1062,7 +1114,6 @@ client.on("interactionCreate", async (i) => {
       orders.set(order.orderId, order);
       saveOrders();
 
-      // IMPORTANT: include Copy Bank button here
       await i.reply({
         embeds: [buildSeaBankInstructions(order)],
         components: buildPaymentButtons(order.orderId),
@@ -1076,7 +1127,6 @@ client.on("interactionCreate", async (i) => {
       return;
     }
 
-    // CANCEL ORDER (ONLY BEFORE DONE)
     if (key === "ob_cancel_user") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
       const allowed = i.user.id === order.userId || isStaff(member);
@@ -1102,7 +1152,6 @@ client.on("interactionCreate", async (i) => {
       return;
     }
 
-    // CLOSE TICKET (AFTER DONE)
     if (key === "ob_close_ticket") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
       const allowed = i.user.id === order.userId || isStaff(member);
@@ -1120,7 +1169,6 @@ client.on("interactionCreate", async (i) => {
       return;
     }
 
-    // CLOSE INELIGIBLE
     if (key === "ob_close_ineligible") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
       const allowed = i.user.id === order.userId || isStaff(member);
