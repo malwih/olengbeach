@@ -31,6 +31,9 @@ const INVOICE_CHANNEL_ID = process.env.INVOICE_CHANNEL_ID; // required
 const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY;
 const ROBLOX_GROUP_ID = 819348691; // from https://www.roblox.com/share/g/819348691
 
+// ✅ Required: cookie for fetching group funds
+const ROBLOX_COOKIE = process.env.ROBLOX_COOKIE; // .ROBLOSECURITY cookie (akun yg punya akses melihat group funds)
+
 const SEABANK_ACCOUNT = process.env.SEABANK_ACCOUNT || "ISI_REKENING";
 const SEABANK_NAME = process.env.SEABANK_NAME || "ISI_NAMA_REKENING";
 
@@ -42,6 +45,9 @@ const AUTO_CLOSE_MINUTES = Number(process.env.AUTO_CLOSE_MINUTES || 30);
 const STORE_NAME = process.env.STORE_NAME || "OLENG BEACH";
 const STORE_FOOTER = process.env.STORE_FOOTER || "OLENG BEACH — Invoice System";
 
+// Stock refresh interval (minutes)
+const STOCK_REFRESH_MINUTES = Number(process.env.STOCK_REFRESH_MINUTES || 2);
+
 if (!DISCORD_TOKEN) throw new Error("Missing DISCORD_TOKEN");
 if (!GUILD_ID) throw new Error("Missing GUILD_ID");
 if (!PANEL_CHANNEL_ID) throw new Error("Missing PANEL_CHANNEL_ID");
@@ -49,6 +55,7 @@ if (!TICKET_CATEGORY_ID) throw new Error("Missing TICKET_CATEGORY_ID");
 if (!STAFF_ROLE_ID) throw new Error("Missing STAFF_ROLE_ID");
 if (!ROBLOX_API_KEY) throw new Error("Missing ROBLOX_API_KEY");
 if (!INVOICE_CHANNEL_ID) throw new Error("Missing INVOICE_CHANNEL_ID");
+if (!ROBLOX_COOKIE) throw new Error("Missing ROBLOX_COOKIE (.ROBLOSECURITY)");
 
 // ========= STORAGE =========
 const DATA_FILE = path.resolve("./orders.json");
@@ -106,33 +113,6 @@ function isStaff(member) {
 function computeTotal(qty) {
   const blocks = qty / 1000;
   return Math.round(blocks * PRICE_PER_1000);
-}
-
-// ========= STOCK STORAGE =========
-const STOCK_FILE = path.resolve("./stock.json");
-let stockState = {
-  status: "READY", // READY | HABIS
-  updatedAt: null,
-  updatedBy: null,
-};
-
-function loadStock() {
-  try {
-    if (!fs.existsSync(STOCK_FILE)) return;
-    const raw = fs.readFileSync(STOCK_FILE, "utf-8");
-    const json = JSON.parse(raw);
-    if (json?.status) stockState = { ...stockState, ...json };
-  } catch (e) {
-    console.error("Failed to load stock.json:", e);
-  }
-}
-
-function saveStock() {
-  try {
-    fs.writeFileSync(STOCK_FILE, JSON.stringify(stockState, null, 2));
-  } catch (e) {
-    console.error("Failed to save stock.json:", e);
-  }
 }
 
 // ========= ROBLOX HELPERS =========
@@ -244,6 +224,89 @@ async function checkRobloxGroupEligibility(username) {
   };
 }
 
+// ========= AUTO STOCK (GROUP FUNDS) =========
+// GET https://economy.roblox.com/v1/groups/{groupId}/currency -> { robux: number }
+async function robloxGetGroupFunds(groupId) {
+  const url = `https://economy.roblox.com/v1/groups/${groupId}/currency`;
+
+  const r = await fetch(url, {
+    method: "GET",
+    headers: {
+      Cookie: `.ROBLOSECURITY=${ROBLOX_COOKIE}`,
+      "User-Agent": "OLENG-BEACH-StockBot/1.0",
+    },
+  });
+
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`Roblox group funds fetch failed: ${r.status} ${t}`);
+  }
+
+  const json = await r.json();
+  const robux = Number(json?.robux);
+  if (!Number.isFinite(robux)) throw new Error("Roblox group funds invalid response (missing robux).");
+  return robux;
+}
+
+// Reserved = total qty dari order yang masih berjalan (biar tidak oversell)
+function computeReservedRobux() {
+  let reserved = 0;
+
+  for (const o of orders.values()) {
+    if (!o || !o.qty) continue;
+
+    // status yg dianggap "masih ngunci stok"
+    const lockingStatuses = new Set([
+      "AWAITING_PAYMENT",
+      "AWAITING_PROOF",
+      "PROOF_SUBMITTED",
+    ]);
+
+    if (lockingStatuses.has(o.status)) {
+      reserved += Number(o.qty || 0);
+    }
+  }
+
+  return Math.max(0, Math.floor(reserved));
+}
+
+let stockCache = {
+  ok: false,
+  groupFunds: 0,
+  reserved: 0,
+  available: 0,
+  updatedAt: null,
+  error: null,
+};
+
+async function refreshStockCache() {
+  try {
+    const groupFunds = await robloxGetGroupFunds(ROBLOX_GROUP_ID);
+    const reserved = computeReservedRobux();
+    const available = Math.max(0, Math.floor(groupFunds - reserved));
+
+    stockCache = {
+      ok: true,
+      groupFunds,
+      reserved,
+      available,
+      updatedAt: nowIso(),
+      error: null,
+    };
+  } catch (e) {
+    stockCache = {
+      ...stockCache,
+      ok: false,
+      updatedAt: nowIso(),
+      error: String(e?.message || e),
+    };
+  }
+}
+
+function isStockReady() {
+  return Number(stockCache?.available || 0) >= 1000;
+}
+
 // ========= INVOICE (PDF) =========
 function ensureDir(p) {
   if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
@@ -337,10 +400,24 @@ function buildInvoiceEmbed(order) {
 
 // ========= DISCORD UI BUILDERS =========
 function buildPanelEmbed() {
+  const stockLine = stockCache.ok
+    ? `**STOK SEKARANG:** ${fmtIDR(stockCache.available)} Robux`
+    : `**STOK SEKARANG:** (gagal fetch)`;
+
+  const stockWarn = stockCache.ok && stockCache.available < 1000
+    ? "\n\n⛔ **Stock habis (saldo group < 1.000).**"
+    : "";
+
+  const stockMeta = stockCache.ok
+    ? `\n_Updated: ${fmtDateID(stockCache.updatedAt)} WIB_`
+    : `\n_Updated: ${fmtDateID(stockCache.updatedAt)} WIB | Error: ${stockCache.error}_`;
+
   return new EmbedBuilder()
     .setTitle("💸ORDER ROBUX — VIA COMMUNITY PAYOUT")
     .setDescription(
       [
+        stockLine + stockWarn + stockMeta,
+        "",
         "**Syarat sebelum order**",
         `• Wajib join komunitas Roblox minimal **${ELIGIBLE_DAYS} hari**`,
         "• Link komunitas: https://www.roblox.com/share/g/819348691",
@@ -368,23 +445,27 @@ function buildPanelEmbed() {
 }
 
 function buildStockStatusButton() {
-  const isReady = stockState.status === "READY";
+  const ready = isStockReady();
+  const label = ready
+    ? `📦 STOK: ${fmtIDR(stockCache.available)}`
+    : "⛔ STOCK: HABIS";
+
   return new ButtonBuilder()
     .setCustomId("ob_stock_info")
-    .setLabel(isReady ? "📦 STOCK: READY" : "⛔ STOCK: HABIS")
-    .setStyle(isReady ? ButtonStyle.Primary : ButtonStyle.Danger)
+    .setLabel(label)
+    .setStyle(ready ? ButtonStyle.Primary : ButtonStyle.Danger)
     .setDisabled(true);
 }
 
 function buildPanelComponents() {
-  const isReady = stockState.status === "READY";
+  const ready = isStockReady();
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId("ob_order_open_modal")
         .setLabel("💸ORDER ROBUX")
         .setStyle(ButtonStyle.Success)
-        .setDisabled(!isReady),
+        .setDisabled(!ready),
       buildStockStatusButton()
     ),
   ];
@@ -424,7 +505,7 @@ function buildOrderModal() {
 
   const qty = new TextInputBuilder()
     .setCustomId("qty")
-    .setLabel("Jumlah (minimal 1000)")
+    .setLabel("Jumlah (minimal 1000, kelipatan 1000)")
     .setStyle(TextInputStyle.Short)
     .setRequired(true);
 
@@ -592,9 +673,20 @@ function touchActivity(order, reason = "activity") {
   saveOrders();
 }
 
-async function deleteTicketChannel(channel, order, reasonText) {
+/**
+ * Delete ticket channel safely.
+ * - If finalStatus passed, set order.status = finalStatus
+ * - Otherwise, DO NOT override status if already one of terminal statuses
+ */
+async function deleteTicketChannel(channel, order, reasonText, finalStatus = null) {
   try {
-    order.status = "CLOSED";
+    const terminal = new Set(["DONE", "CANCELLED", "INELIGIBLE", "EXPIRED", "CLOSED"]);
+    if (finalStatus) {
+      order.status = finalStatus;
+    } else if (!terminal.has(order.status)) {
+      order.status = "CLOSED";
+    }
+
     order.closedAt = nowIso();
     order.autoCloseEnabled = false;
     order.autoClosePaused = false;
@@ -620,6 +712,13 @@ async function deleteTicketChannel(channel, order, reasonText) {
   }
 }
 
+/**
+ * ✅ Auto-release reserved:
+ * - Jika order idle >= AUTO_CLOSE_MINUTES dan status:
+ *   - AWAITING_PAYMENT -> EXPIRED + delete ticket
+ *   - AWAITING_PROOF   -> EXPIRED + delete ticket (no proof)
+ * - PROOF_SUBMITTED tidak di-expire otomatis (karena sudah kirim bukti)
+ */
 async function runAutoCloseSweep(client) {
   const cutoffMs = AUTO_CLOSE_MINUTES * 60 * 1000;
   const now = Date.now();
@@ -628,7 +727,7 @@ async function runAutoCloseSweep(client) {
     if (!order?.channelId) continue;
     if (!order.autoCloseEnabled) continue;
     if (order.autoClosePaused) continue;
-    if (order.status === "CLOSED" || order.status === "CANCELLED") continue;
+    if (order.status === "CLOSED" || order.status === "CANCELLED" || order.status === "DONE" || order.status === "EXPIRED") continue;
 
     const last = order.lastActivityAt ? new Date(order.lastActivityAt).getTime() : 0;
     if (!last) continue;
@@ -638,11 +737,40 @@ async function runAutoCloseSweep(client) {
         const guild = await client.guilds.fetch(order.guildId);
         const ch = await guild.channels.fetch(order.channelId).catch(() => null);
         if (!ch) continue;
+
+        // ✅ auto-expire only for no-payment / no-proof states (auto-release reserved)
+        if (order.status === "AWAITING_PAYMENT" || order.status === "AWAITING_PROOF") {
+          order.status = "EXPIRED";
+          order.expiredAt = nowIso();
+          order.autoCloseEnabled = false;
+          order.autoClosePaused = false;
+
+          orders.set(order.orderId, order);
+          saveOrders();
+
+          // refresh stock/panel after releasing reserved
+          await refreshStockCache().catch(() => {});
+          await refreshPanelMessage(client).catch(() => {});
+
+          const msg =
+            order.status === "EXPIRED" && order.expiredAt
+              ? `⌛ Ticket expired otomatis (tidak ada aktivitas selama ${AUTO_CLOSE_MINUTES} menit). Order dibatalkan, stok dikembalikan. Ticket akan dihapus...`
+              : `⌛ Ticket ditutup otomatis (inactivity ${AUTO_CLOSE_MINUTES} menit). Ticket akan dihapus...`;
+
+          await deleteTicketChannel(ch, order, msg, "EXPIRED");
+          continue;
+        }
+
+        // fallback: other states -> close as usual
         await deleteTicketChannel(
           ch,
           order,
-          `🔒 Ticket ditutup otomatis (inactivity ${AUTO_CLOSE_MINUTES} menit). Ticket akan dihapus...`
+          `🔒 Ticket ditutup otomatis (inactivity ${AUTO_CLOSE_MINUTES} menit). Ticket akan dihapus...`,
+          "CLOSED"
         );
+
+        await refreshStockCache().catch(() => {});
+        await refreshPanelMessage(client).catch(() => {});
       } catch (e) {
         console.error("Auto-close sweep error:", e);
       }
@@ -652,7 +780,6 @@ async function runAutoCloseSweep(client) {
 
 // ========= DISCORD CLIENT =========
 loadOrders();
-loadStock();
 
 const client = new Client({
   intents: [
@@ -673,18 +800,6 @@ client.once("ready", async () => {
 
   await guild.commands.set([
     new SlashCommandBuilder()
-      .setName("stok")
-      .setDescription("Ubah status stock")
-      .addStringOption((option) =>
-        option
-          .setName("status")
-          .setDescription("Pilih status stock")
-          .setRequired(true)
-          .addChoices({ name: "ready", value: "READY" }, { name: "habis", value: "HABIS" })
-      )
-      .toJSON(),
-
-    new SlashCommandBuilder()
       .setName("proses")
       .setDescription("Staff: proses order")
       .addStringOption((option) =>
@@ -695,7 +810,6 @@ client.once("ready", async () => {
       )
       .toJSON(),
 
-    // ✅ /broadcast dengan pilih channel yang sudah ada di server
     new SlashCommandBuilder()
       .setName("broadcast")
       .setDescription("Staff: broadcast info penting")
@@ -716,8 +830,21 @@ client.once("ready", async () => {
       .toJSON(),
   ]);
 
-  console.log("Slash commands /stok, /proses, /broadcast registered.");
+  console.log("Slash commands /proses, /broadcast registered.");
+
+  // ✅ Initial stock refresh + panel render
+  await refreshStockCache();
   await refreshPanelMessage(client);
+
+  // ✅ Periodic auto refresh stock + panel update
+  setInterval(async () => {
+    try {
+      await refreshStockCache();
+      await refreshPanelMessage(client);
+    } catch (e) {
+      console.error("stock/panel interval error:", e);
+    }
+  }, STOCK_REFRESH_MINUTES * 60 * 1000).unref();
 });
 
 // Track activity + detect payment proof
@@ -748,6 +875,9 @@ client.on("messageCreate", async (msg) => {
         orders.set(order.orderId, order);
         saveOrders();
 
+        await refreshStockCache().catch(() => {});
+        await refreshPanelMessage(client).catch(() => {});
+
         await msg.channel
           .send(
             `✅ Bukti pembayaran diterima dari <@${order.userId}>.\n` +
@@ -776,11 +906,15 @@ client.on("interactionCreate", async (i) => {
         return i.reply({ content: "Channel tidak valid (harus text/announcement).", ephemeral: true });
       }
 
-      // Optional: auto set stock jadi READY + refresh panel
-      stockState.status = "READY";
-      stockState.updatedAt = nowIso();
-      stockState.updatedBy = i.user.id;
-      saveStock();
+      await refreshStockCache();
+
+      if (!isStockReady()) {
+        return i.reply({
+          content: `⛔ Tidak bisa broadcast "stock ready" karena stok sekarang HABIS.\nStok tersedia: **${fmtIDR(stockCache.available)} Robux**`,
+          ephemeral: true,
+        });
+      }
+
       await refreshPanelMessage(client);
 
       await target.send({
@@ -790,24 +924,6 @@ client.on("interactionCreate", async (i) => {
       });
 
       return i.reply({ content: `✅ Broadcast terkirim ke <#${target.id}>`, ephemeral: true });
-    }
-
-    // ===== SLASH COMMAND STOCK =====
-    if (i.isChatInputCommand() && i.commandName === "stok") {
-      const member = await i.guild.members.fetch(i.user.id).catch(() => null);
-      if (!isStaff(member)) return i.reply({ content: "Khusus staff/owner.", ephemeral: true });
-
-      const status = i.options.getString("status");
-      if (!["READY", "HABIS"].includes(status)) return i.reply({ content: "Status tidak valid.", ephemeral: true });
-
-      stockState.status = status;
-      stockState.updatedAt = nowIso();
-      stockState.updatedBy = i.user.id;
-      saveStock();
-
-      await i.reply({ content: `✅ Status stock diubah menjadi **${status}**.`, ephemeral: true });
-      await refreshPanelMessage(client);
-      return;
     }
 
     // ===== SLASH COMMAND PROSES =====
@@ -855,6 +971,9 @@ client.on("interactionCreate", async (i) => {
 
       orders.set(order.orderId, order);
       saveOrders();
+
+      await refreshStockCache().catch(() => {});
+      await refreshPanelMessage(client).catch(() => {});
 
       const now = new Date();
       const tanggal = now.toLocaleDateString("id-ID", { timeZone: "Asia/Jakarta" });
@@ -922,8 +1041,14 @@ client.on("interactionCreate", async (i) => {
 
     // ===== ORDER button -> modal =====
     if (i.isButton() && i.customId === "ob_order_open_modal") {
-      if (stockState.status !== "READY") {
-        return i.reply({ content: "⛔ Stock sedang HABIS. Silakan tunggu sampai stock READY.", ephemeral: true });
+      await refreshStockCache();
+      await refreshPanelMessage(client).catch(() => {});
+
+      if (!isStockReady()) {
+        return i.reply({
+          content: `⛔ Stock HABIS.\nStok tersedia sekarang: **${fmtIDR(stockCache.available)} Robux**`,
+          ephemeral: true,
+        });
       }
       return i.showModal(buildOrderModal());
     }
@@ -938,6 +1063,22 @@ client.on("interactionCreate", async (i) => {
 
       const qty = Number(String(qtyRaw || "").replace(/[^\d]/g, ""));
       if (!Number.isFinite(qty) || qty < 1000) return i.editReply("Jumlah minimal 1000.");
+      if (qty % 1000 !== 0) return i.editReply("Jumlah harus kelipatan 1000 (contoh: 1000 / 2000 / 3000).");
+
+      // ✅ cek stock real-time sebelum lanjut
+      await refreshStockCache();
+      await refreshPanelMessage(client).catch(() => {});
+
+      if (!isStockReady()) {
+        return i.editReply(`⛔ Stock HABIS.\nStok tersedia sekarang: **${fmtIDR(stockCache.available)} Robux**`);
+      }
+
+      if (qty > stockCache.available) {
+        return i.editReply(
+          `❌ Order gagal. Jumlah Robux yang kamu input **lebih besar** dari stok tersedia.\n` +
+          `✅ Stok tersedia sekarang: **${fmtIDR(stockCache.available)} Robux**`
+        );
+      }
 
       let eligibility;
       try {
@@ -1030,6 +1171,9 @@ client.on("interactionCreate", async (i) => {
       orders.set(orderId, order);
       saveOrders();
 
+      await refreshStockCache().catch(() => {});
+      await refreshPanelMessage(client).catch(() => {});
+
       const statusEmbed = buildCustomerStatusEmbed(order);
 
       if (order.robloxEligible) {
@@ -1114,6 +1258,9 @@ client.on("interactionCreate", async (i) => {
       orders.set(order.orderId, order);
       saveOrders();
 
+      await refreshStockCache().catch(() => {});
+      await refreshPanelMessage(client).catch(() => {});
+
       await i.reply({
         embeds: [buildSeaBankInstructions(order)],
         components: buildPaymentButtons(order.orderId),
@@ -1121,7 +1268,7 @@ client.on("interactionCreate", async (i) => {
 
       await i.channel
         .send(
-          "📌 Setelah transfer, kirim **bukti pembayaran (gambar/ss)** di sini. Jika dalam **30 Menit** tidak kirim bukti pembayaran, order akan di close."
+          "📌 Setelah transfer, kirim **bukti pembayaran (gambar/ss)** di sini. Jika dalam **30 Menit** tidak kirim bukti pembayaran, order akan di close (expired) otomatis."
         )
         .catch(() => {});
       return;
@@ -1147,8 +1294,11 @@ client.on("interactionCreate", async (i) => {
       orders.set(order.orderId, order);
       saveOrders();
 
+      await refreshStockCache().catch(() => {});
+      await refreshPanelMessage(client).catch(() => {});
+
       await i.reply({ content: "❌ Order ditutup. Ticket akan dihapus dalam 3 detik...", ephemeral: true });
-      await deleteTicketChannel(i.channel, order, "❌ Order ditutup oleh user. Ticket akan dihapus...");
+      await deleteTicketChannel(i.channel, order, "❌ Order ditutup oleh user. Ticket akan dihapus...", "CANCELLED");
       return;
     }
 
@@ -1165,7 +1315,11 @@ client.on("interactionCreate", async (i) => {
       }
 
       await i.reply({ content: "🔒 Ticket akan dihapus dalam 3 detik...", ephemeral: true });
-      await deleteTicketChannel(i.channel, order, "🔒 Ticket ditutup. Ticket akan dihapus...");
+      await deleteTicketChannel(i.channel, order, "🔒 Ticket ditutup. Ticket akan dihapus...", "CLOSED");
+
+      await refreshStockCache().catch(() => {});
+      await refreshPanelMessage(client).catch(() => {});
+
       return;
     }
 
@@ -1182,8 +1336,11 @@ client.on("interactionCreate", async (i) => {
       orders.set(order.orderId, order);
       saveOrders();
 
+      await refreshStockCache().catch(() => {});
+      await refreshPanelMessage(client).catch(() => {});
+
       await i.reply({ content: "🔒 Ticket akan dihapus dalam 3 detik...", ephemeral: true });
-      await deleteTicketChannel(i.channel, order, "🔒 Ticket ditutup (ineligible). Ticket akan dihapus...");
+      await deleteTicketChannel(i.channel, order, "🔒 Ticket ditutup (ineligible). Ticket akan dihapus...", "CLOSED");
       return;
     }
   } catch (e) {
