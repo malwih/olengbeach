@@ -543,7 +543,7 @@ function buildCustomerStatusEmbed(order) {
         `💰 **Total Harga:** Rp ${fmtIDR(order.total)}`,
         "",
         "Klik **Bank Transfer** untuk melihat instruksi pembayaran.",
-        "Setelah transfer, kirim **bukti pembayaran (gambar)** di ticket ini.",
+        "Setelah transfer, kirim **bukti pembayaran (file apapun / gambar / dokumen / forward)** di ticket ini.",
       ].join("\n")
     : [
         `👤 **Username Roblox:** \`${order.robloxUsername}\``,
@@ -617,7 +617,7 @@ function buildSeaBankInstructions(order) {
         `**Bank SeaBank:** \`${SEABANK_ACCOUNT}\``,
         `**A/N:** ${SEABANK_NAME}`,
         "",
-        "✅ Setelah transfer, **kirim bukti transfer (gambar/ss)** di chat ticket ini.",
+        "✅ Setelah transfer, **kirim bukti transfer (file apapun / gambar / dokumen / forward)** di chat ticket ini.",
         "⚠️ Pastikan nominal & rekening benar.",
       ].join("\n")
     )
@@ -753,9 +753,8 @@ async function runAutoCloseSweep(client) {
           await refreshPanelMessage(client).catch(() => {});
 
           const msg =
-            order.status === "EXPIRED" && order.expiredAt
-              ? `⌛ Ticket expired otomatis (tidak ada aktivitas selama ${AUTO_CLOSE_MINUTES} menit). Order dibatalkan, stok dikembalikan. Ticket akan dihapus...`
-              : `⌛ Ticket ditutup otomatis (inactivity ${AUTO_CLOSE_MINUTES} menit). Ticket akan dihapus...`;
+            `⌛ Ticket expired otomatis (tidak ada aktivitas selama ${AUTO_CLOSE_MINUTES} menit). ` +
+            `Order dibatalkan, stok dikembalikan. Ticket akan dihapus...`;
 
           await deleteTicketChannel(ch, order, msg, "EXPIRED");
           continue;
@@ -847,7 +846,7 @@ client.once("ready", async () => {
   }, STOCK_REFRESH_MINUTES * 60 * 1000).unref();
 });
 
-// Track activity + detect payment proof
+// Track activity + detect payment proof (ANY FILE, including forwarded media/attachments)
 client.on("messageCreate", async (msg) => {
   try {
     if (!msg.guild || msg.author.bot) return;
@@ -855,36 +854,44 @@ client.on("messageCreate", async (msg) => {
     const order = Array.from(orders.values()).find((o) => o.channelId === msg.channelId);
     if (!order) return;
 
-    touchActivity(order, "chat_message");
+    const isCustomer = msg.author.id === order.userId;
 
-    if (order.status === "AWAITING_PROOF" && msg.author.id === order.userId) {
-      const attachments = msg.attachments;
-      if (!attachments || attachments.size === 0) return;
+    // ✅ Every message from customer pauses auto-close, regardless of content
+    if (isCustomer) {
+      order.autoClosePaused = true;
+      touchActivity(order, "user_message_pause_autoclose");
+      orders.set(order.orderId, order);
+      saveOrders();
+    } else {
+      touchActivity(order, "non_customer_message");
+    }
 
-      const hasImage = [...attachments.values()].some(
-        (a) => a.contentType && a.contentType.startsWith("image/")
-      );
+    // ✅ Proof submission: accept ANY attachment OR any forwarded media (Discord attachments)
+    if (order.status === "AWAITING_PROOF" && isCustomer) {
+      const hasAnyAttachment = msg.attachments && msg.attachments.size > 0;
 
-      if (hasImage) {
-        order.status = "PROOF_SUBMITTED";
-        order.proofSubmittedAt = nowIso();
+      // Some forwards still appear as attachments; accept that as proof too.
+      if (!hasAnyAttachment) return;
 
-        order.autoClosePaused = true;
-        touchActivity(order, "proof_image_submitted");
+      order.status = "PROOF_SUBMITTED";
+      order.proofSubmittedAt = nowIso();
+      order.autoClosePaused = true;
 
-        orders.set(order.orderId, order);
-        saveOrders();
+      touchActivity(order, "proof_any_file_submitted");
 
-        await refreshStockCache().catch(() => {});
-        await refreshPanelMessage(client).catch(() => {});
+      orders.set(order.orderId, order);
+      saveOrders();
 
-        await msg.channel
-          .send(
-            `✅ Bukti pembayaran diterima dari <@${order.userId}>.\n` +
-              `👮‍♂️ Staff/Owner akan proses Robux kamu, mohon bersedia menunggu...`
-          )
-          .catch(() => {});
-      }
+      await refreshStockCache().catch(() => {});
+      await refreshPanelMessage(client).catch(() => {});
+
+      await msg.channel
+        .send(
+          `✅ Bukti pembayaran diterima dari <@${order.userId}>.\n` +
+            `📎 Tipe bukti: **file/forward**\n` +
+            `👮‍♂️ Staff/Owner akan proses Robux kamu, mohon bersedia menunggu...`
+        )
+        .catch(() => {});
     }
   } catch (e) {
     console.error("messageCreate error:", e);
@@ -959,7 +966,7 @@ client.on("interactionCreate", async (i) => {
       }
 
       if (order.status !== "PROOF_SUBMITTED" && order.status !== "AWAITING_PROOF") {
-        return i.reply({ content: "Belum ada bukti pembayaran (gambar).", ephemeral: true });
+        return i.reply({ content: "Belum ada bukti pembayaran (file/forward).", ephemeral: true });
       }
 
       // DONE
@@ -1253,7 +1260,7 @@ client.on("interactionCreate", async (i) => {
       if (!allowed) return i.reply({ content: "Kamu tidak punya akses untuk order ini.", ephemeral: true });
 
       order.status = "AWAITING_PROOF";
-      order.autoClosePaused = false;
+      order.autoClosePaused = false; // start counting again until user sends proof
       touchActivity(order, "bank_transfer_clicked");
       orders.set(order.orderId, order);
       saveOrders();
@@ -1268,7 +1275,7 @@ client.on("interactionCreate", async (i) => {
 
       await i.channel
         .send(
-          "📌 Setelah transfer, kirim **bukti pembayaran (gambar/ss)** di sini. Jika dalam **30 Menit** tidak kirim bukti pembayaran, order akan di close (expired) otomatis."
+          "📌 Setelah transfer, kirim **bukti pembayaran (file apapun / gambar / dokumen / forward)** di sini. Jika dalam **30 Menit** tidak kirim bukti pembayaran, order akan di close (expired) otomatis."
         )
         .catch(() => {});
       return;
