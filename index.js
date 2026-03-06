@@ -29,10 +29,10 @@ const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
 const INVOICE_CHANNEL_ID = process.env.INVOICE_CHANNEL_ID; // required
 
 const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY;
-const ROBLOX_GROUP_ID = 819348691; // from https://www.roblox.com/share/g/819348691
+const ROBLOX_GROUP_ID = 819348691;
 
 // ✅ Required: cookie for fetching group funds
-const ROBLOX_COOKIE = process.env.ROBLOX_COOKIE; // .ROBLOSECURITY cookie (akun yg punya akses melihat group funds)
+const ROBLOX_COOKIE = process.env.ROBLOX_COOKIE;
 
 const SEABANK_ACCOUNT = process.env.SEABANK_ACCOUNT || "ISI_REKENING";
 const SEABANK_NAME = process.env.SEABANK_NAME || "ISI_NAMA_REKENING";
@@ -225,7 +225,6 @@ async function checkRobloxGroupEligibility(username) {
 }
 
 // ========= AUTO STOCK (GROUP FUNDS) =========
-// GET https://economy.roblox.com/v1/groups/{groupId}/currency -> { robux: number }
 async function robloxGetGroupFunds(groupId) {
   const url = `https://economy.roblox.com/v1/groups/${groupId}/currency`;
 
@@ -248,14 +247,12 @@ async function robloxGetGroupFunds(groupId) {
   return robux;
 }
 
-// Reserved = total qty dari order yang masih berjalan (biar tidak oversell)
 function computeReservedRobux() {
   let reserved = 0;
 
   for (const o of orders.values()) {
     if (!o || !o.qty) continue;
 
-    // status yg dianggap "masih ngunci stok"
     const lockingStatuses = new Set([
       "AWAITING_PAYMENT",
       "AWAITING_PROOF",
@@ -335,7 +332,7 @@ function createInvoicePdf(order, staffUser) {
       doc.text(`Invoice No : INV-${order.orderId}`);
       doc.text(`Order ID   : ${order.orderId}`);
       doc.text(`Tanggal    : ${fmtDateID(createdAt)} WIB`);
-      doc.text(`Customer   : ${order.userId ? `<@${order.userId}>` : "-"}`);
+      doc.text(`Customer   : <@${order.userId}>`);
       doc.text(`Roblox User : ${order.robloxUsername || "-"}`);
       doc.text(`Metode Bayar: Bank Transfer (SeaBank)`);
       doc.text(`Diproses oleh: ${staffUser?.tag || staffUser?.username || staffUser?.id || "-"}`);
@@ -635,7 +632,7 @@ function buildPaymentButtons(orderId) {
   ];
 }
 
-// ========= BROADCAST (SELECT CHANNEL) =========
+// ========= BROADCAST =========
 function buildStockReadyBroadcastEmbed() {
   return new EmbedBuilder()
     .setTitle("🚨 STOCK ROBUX SUDAH READY LAGI! 🚨")
@@ -673,11 +670,6 @@ function touchActivity(order, reason = "activity") {
   saveOrders();
 }
 
-/**
- * Delete ticket channel safely.
- * - If finalStatus passed, set order.status = finalStatus
- * - Otherwise, DO NOT override status if already one of terminal statuses
- */
 async function deleteTicketChannel(channel, order, reasonText, finalStatus = null) {
   try {
     const terminal = new Set(["DONE", "CANCELLED", "INELIGIBLE", "EXPIRED", "CLOSED"]);
@@ -713,11 +705,11 @@ async function deleteTicketChannel(channel, order, reasonText, finalStatus = nul
 }
 
 /**
- * ✅ Auto-release reserved:
- * - Jika order idle >= AUTO_CLOSE_MINUTES dan status:
- *   - AWAITING_PAYMENT -> EXPIRED + delete ticket
- *   - AWAITING_PROOF   -> EXPIRED + delete ticket (no proof)
- * - PROOF_SUBMITTED tidak di-expire otomatis (karena sudah kirim bukti)
+ * Status auto close:
+ * - AWAITING_PAYMENT  -> EXPIRED
+ * - AWAITING_PROOF    -> EXPIRED
+ * - DONE             -> CLOSED
+ * - PROOF_SUBMITTED  -> tidak auto close
  */
 async function runAutoCloseSweep(client) {
   const cutoffMs = AUTO_CLOSE_MINUTES * 60 * 1000;
@@ -727,7 +719,12 @@ async function runAutoCloseSweep(client) {
     if (!order?.channelId) continue;
     if (!order.autoCloseEnabled) continue;
     if (order.autoClosePaused) continue;
-    if (order.status === "CLOSED" || order.status === "CANCELLED" || order.status === "DONE" || order.status === "EXPIRED") continue;
+
+    // terminal states yang benar-benar tidak perlu diproses lagi
+    if (["CLOSED", "CANCELLED", "EXPIRED"].includes(order.status)) continue;
+
+    // PROOF_SUBMITTED sengaja tidak auto close
+    if (order.status === "PROOF_SUBMITTED") continue;
 
     const last = order.lastActivityAt ? new Date(order.lastActivityAt).getTime() : 0;
     if (!last) continue;
@@ -738,7 +735,6 @@ async function runAutoCloseSweep(client) {
         const ch = await guild.channels.fetch(order.channelId).catch(() => null);
         if (!ch) continue;
 
-        // ✅ auto-expire only for no-payment / no-proof states (auto-release reserved)
         if (order.status === "AWAITING_PAYMENT" || order.status === "AWAITING_PROOF") {
           order.status = "EXPIRED";
           order.expiredAt = nowIso();
@@ -748,7 +744,6 @@ async function runAutoCloseSweep(client) {
           orders.set(order.orderId, order);
           saveOrders();
 
-          // refresh stock/panel after releasing reserved
           await refreshStockCache().catch(() => {});
           await refreshPanelMessage(client).catch(() => {});
 
@@ -760,7 +755,19 @@ async function runAutoCloseSweep(client) {
           continue;
         }
 
-        // fallback: other states -> close as usual
+        if (order.status === "DONE") {
+          await deleteTicketChannel(
+            ch,
+            order,
+            `🔒 Ticket ditutup otomatis setelah order selesai karena tidak ada aktivitas selama ${AUTO_CLOSE_MINUTES} menit. Ticket akan dihapus...`,
+            "CLOSED"
+          );
+
+          await refreshStockCache().catch(() => {});
+          await refreshPanelMessage(client).catch(() => {});
+          continue;
+        }
+
         await deleteTicketChannel(
           ch,
           order,
@@ -831,11 +838,9 @@ client.once("ready", async () => {
 
   console.log("Slash commands /proses, /broadcast registered.");
 
-  // ✅ Initial stock refresh + panel render
   await refreshStockCache();
   await refreshPanelMessage(client);
 
-  // ✅ Periodic auto refresh stock + panel update
   setInterval(async () => {
     try {
       await refreshStockCache();
@@ -846,7 +851,7 @@ client.once("ready", async () => {
   }, STOCK_REFRESH_MINUTES * 60 * 1000).unref();
 });
 
-// Track activity + detect payment proof (ANY FILE, including forwarded media/attachments)
+// ========= MESSAGE TRACKING =========
 client.on("messageCreate", async (msg) => {
   try {
     if (!msg.guild || msg.author.bot) return;
@@ -856,21 +861,35 @@ client.on("messageCreate", async (msg) => {
 
     const isCustomer = msg.author.id === order.userId;
 
-    // ✅ Every message from customer pauses auto-close, regardless of content
+    // Customer message behavior by status
     if (isCustomer) {
-      order.autoClosePaused = true;
-      touchActivity(order, "user_message_pause_autoclose");
+      if (order.status === "AWAITING_PAYMENT" || order.status === "AWAITING_PROOF") {
+        // selama nunggu bayar / bukti, customer message pause timer
+        order.autoClosePaused = true;
+        touchActivity(order, "user_message_pause_autoclose");
+      } else if (order.status === "DONE") {
+        // setelah DONE, customer chat reset inactivity timer tapi jangan pause permanen
+        order.autoClosePaused = false;
+        touchActivity(order, "user_message_after_done");
+      } else {
+        touchActivity(order, "user_message");
+      }
+
       orders.set(order.orderId, order);
       saveOrders();
     } else {
+      // staff / other user message
+      if (order.status === "DONE") {
+        order.autoClosePaused = false;
+      }
       touchActivity(order, "non_customer_message");
+      orders.set(order.orderId, order);
+      saveOrders();
     }
 
-    // ✅ Proof submission: accept ANY attachment OR any forwarded media (Discord attachments)
+    // Proof submission
     if (order.status === "AWAITING_PROOF" && isCustomer) {
       const hasAnyAttachment = msg.attachments && msg.attachments.size > 0;
-
-      // Some forwards still appear as attachments; accept that as proof too.
       if (!hasAnyAttachment) return;
 
       order.status = "PROOF_SUBMITTED";
@@ -900,7 +919,6 @@ client.on("messageCreate", async (msg) => {
 
 client.on("interactionCreate", async (i) => {
   try {
-    // ===== /BROADCAST =====
     if (i.isChatInputCommand() && i.commandName === "broadcast") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
       if (!isStaff(member)) return i.reply({ content: "Khusus staff/owner.", ephemeral: true });
@@ -933,7 +951,6 @@ client.on("interactionCreate", async (i) => {
       return i.reply({ content: `✅ Broadcast terkirim ke <#${target.id}>`, ephemeral: true });
     }
 
-    // ===== SLASH COMMAND PROSES =====
     if (i.isChatInputCommand() && i.commandName === "proses") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
       if (!isStaff(member)) return i.reply({ content: "Khusus staff/owner.", ephemeral: true });
@@ -969,7 +986,6 @@ client.on("interactionCreate", async (i) => {
         return i.reply({ content: "Belum ada bukti pembayaran (file/forward).", ephemeral: true });
       }
 
-      // DONE
       order.status = "DONE";
       order.doneAt = nowIso();
       order.autoClosePaused = false;
@@ -1012,7 +1028,6 @@ client.on("interactionCreate", async (i) => {
         const invoiceFile = new AttachmentBuilder(pdfPath, { name: fileName });
         const invoiceEmbed = buildInvoiceEmbed(order);
 
-        // Send to invoice channel
         try {
           const guild = await client.guilds.fetch(GUILD_ID);
           const invCh = await guild.channels.fetch(INVOICE_CHANNEL_ID).catch(() => null);
@@ -1028,7 +1043,6 @@ client.on("interactionCreate", async (i) => {
           console.error("Invoice channel send error:", eInv?.stack || eInv);
         }
 
-        // Send to ticket
         await i.channel.send({
           content: `🧾 Invoice untuk order **${order.orderId}** (silakan download PDF di bawah).`,
           embeds: [invoiceEmbed],
@@ -1046,7 +1060,6 @@ client.on("interactionCreate", async (i) => {
       return;
     }
 
-    // ===== ORDER button -> modal =====
     if (i.isButton() && i.customId === "ob_order_open_modal") {
       await refreshStockCache();
       await refreshPanelMessage(client).catch(() => {});
@@ -1060,7 +1073,6 @@ client.on("interactionCreate", async (i) => {
       return i.showModal(buildOrderModal());
     }
 
-    // ===== Modal submit -> validate + create ticket =====
     if (i.isModalSubmit() && i.customId === "ob_order_modal_submit") {
       await i.deferReply({ ephemeral: true });
 
@@ -1072,7 +1084,6 @@ client.on("interactionCreate", async (i) => {
       if (!Number.isFinite(qty) || qty < 1000) return i.editReply("Jumlah minimal 1000.");
       if (qty % 1000 !== 0) return i.editReply("Jumlah harus kelipatan 1000 (contoh: 1000 / 2000 / 3000).");
 
-      // ✅ cek stock real-time sebelum lanjut
       await refreshStockCache();
       await refreshPanelMessage(client).catch(() => {});
 
@@ -1207,7 +1218,6 @@ client.on("interactionCreate", async (i) => {
       return;
     }
 
-    // ===== BUTTON HANDLERS =====
     if (!i.isButton()) return;
     if (!i.guild) return;
 
@@ -1260,7 +1270,7 @@ client.on("interactionCreate", async (i) => {
       if (!allowed) return i.reply({ content: "Kamu tidak punya akses untuk order ini.", ephemeral: true });
 
       order.status = "AWAITING_PROOF";
-      order.autoClosePaused = false; // start counting again until user sends proof
+      order.autoClosePaused = false;
       touchActivity(order, "bank_transfer_clicked");
       orders.set(order.orderId, order);
       saveOrders();
@@ -1275,7 +1285,8 @@ client.on("interactionCreate", async (i) => {
 
       await i.channel
         .send(
-          "📌 Setelah transfer, kirim **bukti pembayaran (file apapun / gambar / dokumen / forward)** di sini. Jika dalam **30 Menit** tidak kirim bukti pembayaran, order akan di close (expired) otomatis."
+          `📌 Setelah transfer, kirim **bukti pembayaran (file apapun / gambar / dokumen / forward)** di sini. ` +
+          `Jika dalam **${AUTO_CLOSE_MINUTES} menit** tidak kirim bukti pembayaran, order akan di close (expired) otomatis.`
         )
         .catch(() => {});
       return;
