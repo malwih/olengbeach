@@ -40,8 +40,8 @@ const ELIGIBLE_DAYS = Number(process.env.ELIGIBLE_DAYS || 14);
 const PRICE_PER_1000 = Number(process.env.PRICE_PER_1000 || 100000);
 const AUTO_CLOSE_MINUTES = Number(process.env.AUTO_CLOSE_MINUTES || 30);
 
-const STORE_NAME = process.env.STORE_NAME || "OLENG BEACH";
-const STORE_FOOTER = process.env.STORE_FOOTER || "OLENG BEACH — Invoice System";
+const STORE_NAME = process.env.STORE_NAME || "UNDERCOVER";
+const STORE_FOOTER = process.env.STORE_FOOTER || "UNDERCOVER — Invoice System";
 const STOCK_REFRESH_MINUTES = Number(process.env.STOCK_REFRESH_MINUTES || 2);
 
 if (!DISCORD_TOKEN) throw new Error("Missing DISCORD_TOKEN");
@@ -327,7 +327,7 @@ async function robloxGetGroupFunds(groupId) {
     method: "GET",
     headers: {
       Cookie: `.ROBLOSECURITY=${ROBLOX_COOKIE}`,
-      "User-Agent": "OLENG-BEACH-StockBot/1.0",
+      "User-Agent": "UNDERCOVER-StockBot/1.0",
     },
   });
 
@@ -554,7 +554,7 @@ function buildPanelEmbed() {
         "⚠️ **PENTING — JANGAN TRANSFER sebelum instruksi pembayaran muncul!**",
       ].join("\n")
     )
-    .setFooter({ text: "OLENG BEACH — Order Robux System" });
+    .setFooter({ text: "UNDERCOVER — Order Robux System" });
 }
 
 function buildStockStatusButton() {
@@ -609,7 +609,7 @@ async function refreshPanelMessage(client) {
 function buildOrderModal() {
   const modal = new ModalBuilder()
     .setCustomId("ob_order_modal_submit")
-    .setTitle("Order OLENG BEACH");
+    .setTitle("Order UNDERCOVER");
 
   const username = new TextInputBuilder()
     .setCustomId("roblox_username")
@@ -672,10 +672,10 @@ function buildCustomerStatusEmbed(order) {
       ].join("\n");
 
   return new EmbedBuilder()
-    .setTitle(`OLENG BEACH — Ticket ${order.orderId}`)
+    .setTitle(`UNDERCOVER — Ticket ${order.orderId}`)
     .setDescription(desc)
     .setColor(order.robloxEligible ? 0x2ecc71 : 0xe74c3c)
-    .setFooter({ text: "OLENG BEACH — Order System" });
+    .setFooter({ text: "UNDERCOVER — Order System" });
 }
 
 function buildCustomerButtonsEligible(orderId) {
@@ -736,7 +736,7 @@ function buildSeaBankInstructions(order) {
         "⚠️ Pastikan nominal & rekening benar.",
       ].join("\n")
     )
-    .setFooter({ text: "OLENG BEACH" });
+    .setFooter({ text: "UNDERCOVER" });
 }
 
 function buildPaymentButtons(orderId) {
@@ -773,7 +773,7 @@ function buildStockReadyBroadcastEmbed() {
         "❗ **Buruan order sebelum stok berubah lagi!**",
       ].join("\n")
     )
-    .setFooter({ text: "OLENG BEACH — Realtime Stock Update" })
+    .setFooter({ text: "UNDERCOVER — Realtime Stock Update" })
     .setTimestamp();
 }
 
@@ -791,7 +791,7 @@ function buildStockOutBroadcastEmbed() {
         `🛒 Nanti kalau sudah ready lagi, langsung order di <#${PANEL_CHANNEL_ID}> ya.`,
       ].join("\n")
     )
-    .setFooter({ text: "OLENG BEACH — Realtime Stock Update" })
+    .setFooter({ text: "UNDERCOVER — Realtime Stock Update" })
     .setTimestamp();
 }
 
@@ -836,7 +836,7 @@ function buildTestimoniEmbed(order, customerUser, staffUser) {
       ].join("\n")
     )
     .setThumbnail(customerAvatar)
-    .setFooter({ text: "OLENG BEACH — Testimoni Order" })
+    .setFooter({ text: "UNDERCOVER — Testimoni Order" })
     .setTimestamp();
 }
 
@@ -1370,12 +1370,12 @@ client.on("interactionCreate", async (i) => {
 
         let ticket;
         try {
-          const ticketName = `oleng-${orderId}`.toLowerCase();
+          const ticketName = `ucvr-${orderId}`.toLowerCase();
           ticket = await guild.channels.create({
             name: ticketName,
             type: ChannelType.GuildText,
             parent: TICKET_CATEGORY_ID,
-            topic: `OLENG BEACH | ${orderId} | User: ${user.id} | Roblox: ${robloxUsername}`,
+            topic: `UNDERCOVER | ${orderId} | User: ${user.id} | Roblox: ${robloxUsername}`,
             permissionOverwrites: [
               { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
               {
