@@ -57,6 +57,7 @@ if (!ROBLOX_COOKIE) throw new Error("Missing ROBLOX_COOKIE (.ROBLOSECURITY)");
 // ========= STORAGE =========
 const DATA_FILE = path.resolve("./orders.json");
 const TAG_SETTINGS_FILE = path.resolve("./tag_settings.json");
+const ORDER_SETTINGS_FILE = path.resolve("./order_settings.json");
 
 /** @type {Map<string, any>} */
 const orders = new Map();
@@ -64,6 +65,12 @@ const orders = new Map();
 let tagSettings = {
   enabled: true,
   keyword: "UCVR",
+};
+
+let orderSettings = {
+  orderOpen: true,
+  sellStockLimit: null,
+  stockSessionStartedAt: null,
 };
 
 // ========= TAG SETTINGS =========
@@ -118,11 +125,112 @@ function getTagKeywordLower() {
 
 function displayNameHasRequiredTag(displayName) {
   if (!tagSettings.enabled) return true;
-
   const name = String(displayName || "").toLowerCase();
   const keyword = getTagKeywordLower();
-
   return name.includes(keyword);
+}
+
+// ========= ORDER SETTINGS =========
+function loadOrderSettings() {
+  try {
+    if (!fs.existsSync(ORDER_SETTINGS_FILE)) {
+      saveOrderSettings();
+      return;
+    }
+
+    const raw = fs.readFileSync(ORDER_SETTINGS_FILE, "utf-8");
+    const json = JSON.parse(raw);
+
+    const rawLimit = json.sellStockLimit;
+    const sellStockLimit =
+      Number.isFinite(Number(rawLimit)) && Number(rawLimit) >= 0
+        ? Math.floor(Number(rawLimit))
+        : null;
+
+    orderSettings = {
+      orderOpen: typeof json.orderOpen === "boolean" ? json.orderOpen : true,
+      sellStockLimit,
+      stockSessionStartedAt: json.stockSessionStartedAt || null,
+    };
+
+    saveOrderSettings();
+  } catch (e) {
+    console.error("Failed to load order_settings.json:", e);
+    orderSettings = {
+      orderOpen: true,
+      sellStockLimit: null,
+      stockSessionStartedAt: null,
+    };
+    saveOrderSettings();
+  }
+}
+
+function saveOrderSettings() {
+  try {
+    fs.writeFileSync(ORDER_SETTINGS_FILE, JSON.stringify(orderSettings, null, 2));
+  } catch (e) {
+    console.error("Failed to save order_settings.json:", e);
+  }
+}
+
+function isManualStockMode() {
+  return Number.isFinite(Number(orderSettings.sellStockLimit));
+}
+
+function getManualStockLimit() {
+  if (!isManualStockMode()) return null;
+  return Math.max(0, Math.floor(Number(orderSettings.sellStockLimit || 0)));
+}
+
+function orderCreatedInsideCurrentStockSession(order) {
+  if (!isManualStockMode()) return false;
+  if (!orderSettings.stockSessionStartedAt) return true;
+
+  const createdAt = new Date(order.createdAt || 0).getTime();
+  const sessionAt = new Date(orderSettings.stockSessionStartedAt).getTime();
+
+  if (!Number.isFinite(createdAt) || !Number.isFinite(sessionAt)) return false;
+
+  return createdAt >= sessionAt;
+}
+
+function isOrderConsumingManualStock(order) {
+  if (!order || !order.qty) return false;
+  if (!orderCreatedInsideCurrentStockSession(order)) return false;
+
+  if (["CANCELLED", "EXPIRED", "INELIGIBLE"].includes(order.status)) return false;
+
+  // CLOSED yang berasal dari order DONE tetap dihitung karena sudah pernah terjual.
+  if (order.doneAt) return true;
+
+  return [
+    "AWAITING_PAYMENT",
+    "AWAITING_PROOF",
+    "PROOF_SUBMITTED",
+    "DONE",
+    "CLOSED",
+  ].includes(order.status);
+}
+
+function computeManualStockUsed() {
+  if (!isManualStockMode()) return 0;
+
+  let used = 0;
+
+  for (const o of orders.values()) {
+    if (isOrderConsumingManualStock(o)) {
+      used += Number(o.qty || 0);
+    }
+  }
+
+  return Math.max(0, Math.floor(used));
+}
+
+function computeManualStockAvailable() {
+  if (!isManualStockMode()) return null;
+  const limit = getManualStockLimit();
+  const used = computeManualStockUsed();
+  return Math.max(0, Math.floor(limit - used));
 }
 
 // ========= ORDER CREATION LOCK =========
@@ -542,6 +650,9 @@ let stockCache = {
   groupFunds: 0,
   reserved: 0,
   available: 0,
+  manualLimit: null,
+  manualUsed: 0,
+  manualAvailable: null,
   updatedAt: null,
   error: null,
 };
@@ -558,13 +669,27 @@ async function refreshStockCache() {
   try {
     const groupFunds = await robloxGetGroupFunds(ROBLOX_GROUP_ID);
     const reserved = computeReservedRobux();
-    const available = Math.max(0, Math.floor(groupFunds - reserved));
+
+    const manualLimit = getManualStockLimit();
+    const manualUsed = computeManualStockUsed();
+    const manualAvailable = isManualStockMode()
+      ? Math.max(0, manualLimit - manualUsed)
+      : null;
+
+    const groupAvailable = Math.max(0, Math.floor(groupFunds - reserved));
+
+    const available = isManualStockMode()
+      ? Math.max(0, Math.min(groupAvailable, manualAvailable))
+      : groupAvailable;
 
     stockCache = {
       ok: true,
       groupFunds,
       reserved,
       available,
+      manualLimit,
+      manualUsed,
+      manualAvailable,
       updatedAt: nowIso(),
       error: null,
     };
@@ -584,10 +709,11 @@ async function refreshStockCache() {
 }
 
 function isStockReady() {
-  return Number(stockCache?.available || 0) >= 1000;
+  return orderSettings.orderOpen && Number(stockCache?.available || 0) >= 1000;
 }
 
 function getStockBroadcastMode(available) {
+  if (!orderSettings.orderOpen) return "OUT";
   return Number(available || 0) >= 1000 ? "READY" : "OUT";
 }
 
@@ -693,15 +819,35 @@ function buildInvoiceEmbed(order) {
 
 // ========= DISCORD UI BUILDERS =========
 function buildPanelEmbed() {
+  const orderLine = orderSettings.orderOpen
+    ? "**STATUS ORDER:** OPEN"
+    : "**STATUS ORDER:** CLOSED";
+
   const stockLine = stockCache.ok
     ? `**STATUS STOK:** ${isStockReady() ? "READY" : "HABIS"}`
     : `**STATUS STOK:** (gagal fetch)`;
 
-  const stockWarn = "";
-
   const stockMeta = stockCache.ok
     ? `\n_Updated: ${fmtDateID(stockCache.updatedAt)} WIB_`
     : `\n_Updated: ${fmtDateID(stockCache.updatedAt)} WIB | Error: ${stockCache.error}_`;
+
+  const stokDetailLine = stockCache.ok
+    ? isManualStockMode()
+      ? [
+          `**STOK JUAL:** ${fmtIDR(stockCache.manualAvailable)} / ${fmtIDR(stockCache.manualLimit)} Robux`,
+          `**GROUP FUNDS:** ${fmtIDR(stockCache.groupFunds)} Robux`,
+          `**TERKUNCI ORDER:** ${fmtIDR(stockCache.reserved)} Robux`,
+        ].join("\n")
+      : [
+          `**STOK TERSEDIA:** ${fmtIDR(stockCache.available)} Robux`,
+          `**GROUP FUNDS:** ${fmtIDR(stockCache.groupFunds)} Robux`,
+          `**TERKUNCI ORDER:** ${fmtIDR(stockCache.reserved)} Robux`,
+        ].join("\n")
+    : "";
+
+  const closedNotice = orderSettings.orderOpen
+    ? ""
+    : "\n⛔ **Order sedang ditutup oleh staff. Silakan tunggu sampai order dibuka kembali.**\n";
 
   const tagKeyword = getTagKeywordUpper();
   const tagLower = getTagKeywordLower();
@@ -717,7 +863,10 @@ function buildPanelEmbed() {
     .setTitle("💸ORDER ROBUX — VIA COMMUNITY PAYOUT")
     .setDescription(
       [
-        stockLine + stockWarn + stockMeta,
+        orderLine,
+        stockLine + stockMeta,
+        stokDetailLine,
+        closedNotice,
         "",
         "**Syarat sebelum order**",
         `• Wajib join komunitas Roblox minimal **${ELIGIBLE_DAYS} hari**`,
@@ -751,7 +900,11 @@ function buildPanelEmbed() {
 
 function buildStockStatusButton() {
   const ready = isStockReady();
-  const label = ready ? "📦 STOK: READY" : "⛔ STOK: HABIS";
+  const label = !orderSettings.orderOpen
+    ? "⛔ ORDER: CLOSED"
+    : ready
+      ? "📦 STOK: READY"
+      : "⛔ STOK: HABIS";
 
   return new ButtonBuilder()
     .setCustomId("ob_stock_info")
@@ -1004,7 +1157,7 @@ function buildStockOutBroadcastEmbed() {
     .setTitle("🚨⛔ STOCK ROBUX HABIS ⛔🚨")
     .setDescription(
       [
-        "😵 **Untuk saat ini stok Robux sedang habis.**",
+        "😵 **Untuk saat ini stok Robux sedang habis / order sedang ditutup.**",
         "",
         "📌 Tunggu update stok berikutnya di channel ini.",
         "🔔 Kalau stok masuk lagi, bot akan langsung kasih info terbaru.",
@@ -1303,6 +1456,7 @@ async function runAutoCloseSweep(client) {
 // ========= DISCORD CLIENT =========
 loadOrders();
 loadTagSettings();
+loadOrderSettings();
 
 const client = new Client({
   intents: [
@@ -1363,9 +1517,34 @@ client.once("ready", async () => {
           .setRequired(false)
       )
       .toJSON(),
+
+    new SlashCommandBuilder()
+      .setName("order")
+      .setDescription("Staff: buka/tutup order dan atur stok jual Robux")
+      .addStringOption((option) =>
+        option
+          .setName("aksi")
+          .setDescription("Pilih aksi")
+          .setRequired(true)
+          .addChoices(
+            { name: "status", value: "STATUS" },
+            { name: "open", value: "OPEN" },
+            { name: "close", value: "CLOSE" },
+            { name: "setstok", value: "SETSTOK" },
+            { name: "resetstok", value: "RESETSTOK" }
+          )
+      )
+      .addIntegerOption((option) =>
+        option
+          .setName("jumlah")
+          .setDescription("Jumlah Robux yang mau dijual, contoh 10000")
+          .setRequired(false)
+          .setMinValue(0)
+      )
+      .toJSON(),
   ]);
 
-  console.log("Slash commands /proses and /tagmap registered.");
+  console.log("Slash commands /proses, /tagmap, and /order registered.");
 
   await syncStockAndPanel(client, { suppressBroadcast: true });
 
@@ -1440,6 +1619,109 @@ client.on("messageCreate", async (msg) => {
 // ========= INTERACTIONS =========
 client.on("interactionCreate", async (i) => {
   try {
+    if (i.isChatInputCommand() && i.commandName === "order") {
+      const member = await i.guild.members.fetch(i.user.id).catch(() => null);
+
+      if (!isStaff(member)) {
+        return i.reply({ content: "Khusus staff/owner.", ephemeral: true });
+      }
+
+      const aksi = i.options.getString("aksi");
+      const jumlah = i.options.getInteger("jumlah");
+
+      if (aksi === "STATUS") {
+        await syncStockAndPanel(client).catch(() => {});
+
+        return i.reply({
+          content:
+            `📦 **Status Order Robux**\n` +
+            `Order: **${orderSettings.orderOpen ? "OPEN" : "CLOSED"}**\n` +
+            `Mode stok: **${isManualStockMode() ? "MANUAL" : "AUTO GROUP FUNDS"}**\n` +
+            `Stok jual limit: **${isManualStockMode() ? fmtIDR(getManualStockLimit()) + " Robux" : "Tidak dibatasi manual"}**\n` +
+            `Stok jual terpakai sesi ini: **${fmtIDR(computeManualStockUsed())} Robux**\n` +
+            `Group funds: **${stockCache.ok ? fmtIDR(stockCache.groupFunds) : "-"} Robux**\n` +
+            `Reserved order: **${stockCache.ok ? fmtIDR(stockCache.reserved) : "-"} Robux**\n` +
+            `Available tampil di panel: **${stockCache.ok ? fmtIDR(stockCache.available) : "-"} Robux**`,
+          ephemeral: true,
+        });
+      }
+
+      if (aksi === "OPEN") {
+        orderSettings.orderOpen = true;
+        saveOrderSettings();
+
+        await syncStockAndPanel(client).catch(() => {});
+
+        return i.reply({
+          content: "✅ Order Robux sudah **DIBUKA**.",
+          ephemeral: true,
+        });
+      }
+
+      if (aksi === "CLOSE") {
+        orderSettings.orderOpen = false;
+        saveOrderSettings();
+
+        await syncStockAndPanel(client).catch(() => {});
+
+        return i.reply({
+          content: "✅ Order Robux sudah **DITUTUP**. Tombol order di panel otomatis mati.",
+          ephemeral: true,
+        });
+      }
+
+      if (aksi === "SETSTOK") {
+        if (!Number.isFinite(Number(jumlah)) || Number(jumlah) < 0) {
+          return i.reply({
+            content: "❌ Isi jumlah stok jual. Contoh: `/order aksi:setstok jumlah:10000`",
+            ephemeral: true,
+          });
+        }
+
+        const cleanJumlah = Math.floor(Number(jumlah));
+
+        if (cleanJumlah % 1000 !== 0) {
+          return i.reply({
+            content: "❌ Jumlah stok jual harus kelipatan 1000. Contoh: 10000, 20000, 50000.",
+            ephemeral: true,
+          });
+        }
+
+        orderSettings.sellStockLimit = cleanJumlah;
+        orderSettings.stockSessionStartedAt = nowIso();
+
+        saveOrderSettings();
+
+        await syncStockAndPanel(client).catch(() => {});
+
+        return i.reply({
+          content:
+            `✅ Stok jual manual berhasil diset ke **${fmtIDR(cleanJumlah)} Robux**.\n` +
+            `Sesi stok dimulai sekarang. Order lama sebelum command ini tidak akan mengurangi stok jual baru.\n\n` +
+            `Contoh: kalau group funds 20.000 tapi stok jual diset 10.000, bot hanya menjual 10.000.`,
+          ephemeral: true,
+        });
+      }
+
+      if (aksi === "RESETSTOK") {
+        orderSettings.sellStockLimit = null;
+        orderSettings.stockSessionStartedAt = null;
+
+        saveOrderSettings();
+
+        await syncStockAndPanel(client).catch(() => {});
+
+        return i.reply({
+          content:
+            "✅ Stok jual manual sudah direset.\n" +
+            "Sekarang stok mengikuti group funds dikurangi order yang sedang terkunci.",
+          ephemeral: true,
+        });
+      }
+
+      return i.reply({ content: "Aksi tidak valid.", ephemeral: true });
+    }
+
     if (i.isChatInputCommand() && i.commandName === "tagmap") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
 
@@ -1654,6 +1936,13 @@ client.on("interactionCreate", async (i) => {
     if (i.isButton() && i.customId === "ob_order_open_modal") {
       await syncStockAndPanel(client).catch(() => {});
 
+      if (!orderSettings.orderOpen) {
+        return i.reply({
+          content: "⛔ Order Robux sedang **CLOSED** oleh staff.",
+          ephemeral: true,
+        });
+      }
+
       if (!isStockReady()) {
         return i.reply({
           content: `⛔ Stock HABIS.\nStatus stok saat ini: **HABIS**`,
@@ -1666,6 +1955,13 @@ client.on("interactionCreate", async (i) => {
 
     if (i.isButton() && i.customId === "ob_order_retry_panel") {
       await syncStockAndPanel(client).catch(() => {});
+
+      if (!orderSettings.orderOpen) {
+        return i.reply({
+          content: "⛔ Order Robux sedang **CLOSED** oleh staff.",
+          ephemeral: true,
+        });
+      }
 
       if (!isStockReady()) {
         return i.reply({
@@ -1703,6 +1999,10 @@ client.on("interactionCreate", async (i) => {
 
         await syncStockAndPanel(client).catch(() => {});
 
+        if (!orderSettings.orderOpen) {
+          return i.editReply("⛔ Order Robux sedang **CLOSED** oleh staff.");
+        }
+
         if (!isStockReady()) {
           return i.editReply(`⛔ Stock HABIS.\nStatus stok saat ini: **HABIS**`);
         }
@@ -1710,6 +2010,7 @@ client.on("interactionCreate", async (i) => {
         if (qty > stockCache.available) {
           return i.editReply(
             `❌ Order gagal. Jumlah Robux yang kamu input **lebih besar** dari stok yang bisa diproses saat ini.\n` +
+              `Stok tersedia saat ini: **${fmtIDR(stockCache.available)} Robux**\n` +
               `Silakan coba jumlah yang lebih kecil atau tunggu update stok berikutnya.`
           );
         }
@@ -1723,8 +2024,6 @@ client.on("interactionCreate", async (i) => {
           return i.editReply("Gagal cek komunitas Roblox/API Roblox. Coba lagi beberapa saat.");
         }
 
-        // KHUSUS GAGAL KARENA DISPLAY NAME TIDAK ADA TAG MAP:
-        // TIDAK BUAT TICKET, BALAS EPHEMERAL DI PANEL SAJA.
         if (!eligibility.ok && eligibility.failType === "TAG_MISSING") {
           const tagUpper = getTagKeywordUpper();
           const tagLower = getTagKeywordLower();
@@ -1834,6 +2133,10 @@ client.on("interactionCreate", async (i) => {
           createdAt: nowIso(),
           lastActivityAt: nowIso(),
 
+          stockSessionStartedAt: orderSettings.stockSessionStartedAt || null,
+          manualStockModeAtOrder: isManualStockMode(),
+          manualStockLimitAtOrder: getManualStockLimit(),
+
           autoCloseEnabled: true,
           autoClosePaused: false,
           autoCloseDeadlineAt: new Date(Date.now() + AUTO_CLOSE_MINUTES * 60 * 1000).toISOString(),
@@ -1921,6 +2224,13 @@ client.on("interactionCreate", async (i) => {
       }
 
       await syncStockAndPanel(client).catch(() => {});
+
+      if (!orderSettings.orderOpen) {
+        return i.reply({
+          content: "⛔ Order Robux sedang **CLOSED** oleh staff.",
+          ephemeral: true,
+        });
+      }
 
       if (!isStockReady()) {
         return i.reply({
