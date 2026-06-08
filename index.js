@@ -57,6 +57,7 @@ if (!ROBLOX_COOKIE) throw new Error("Missing ROBLOX_COOKIE (.ROBLOSECURITY)");
 // ========= STORAGE =========
 const DATA_FILE = path.resolve("./orders.json");
 const TAG_SETTINGS_FILE = path.resolve("./tag_settings.json");
+const ORDER_SETTINGS_FILE = path.resolve("./order_settings.json");
 
 /** @type {Map<string, any>} */
 const orders = new Map();
@@ -65,6 +66,69 @@ let tagSettings = {
   enabled: true,
   keyword: "UCVR",
 };
+
+let orderSettings = {
+  open: true,
+  reason: "",
+  updatedAt: null,
+  updatedBy: null,
+};
+
+// ========= ORDER SETTINGS =========
+function loadOrderSettings() {
+  try {
+    if (!fs.existsSync(ORDER_SETTINGS_FILE)) {
+      saveOrderSettings();
+      return;
+    }
+
+    const raw = fs.readFileSync(ORDER_SETTINGS_FILE, "utf-8");
+    const json = JSON.parse(raw);
+
+    orderSettings = {
+      open: typeof json.open === "boolean" ? json.open : true,
+      reason: typeof json.reason === "string" ? json.reason : "",
+      updatedAt: json.updatedAt || null,
+      updatedBy: json.updatedBy || null,
+    };
+
+    saveOrderSettings();
+  } catch (e) {
+    console.error("Failed to load order_settings.json:", e);
+    orderSettings = {
+      open: true,
+      reason: "",
+      updatedAt: null,
+      updatedBy: null,
+    };
+    saveOrderSettings();
+  }
+}
+
+function saveOrderSettings() {
+  try {
+    fs.writeFileSync(ORDER_SETTINGS_FILE, JSON.stringify(orderSettings, null, 2));
+  } catch (e) {
+    console.error("Failed to save order_settings.json:", e);
+  }
+}
+
+function isOrderOpen() {
+  return orderSettings.open === true;
+}
+
+function setOrderOpenState(open, userId = null, reason = "") {
+  orderSettings.open = Boolean(open);
+  orderSettings.reason = String(reason || "").trim();
+  orderSettings.updatedAt = nowIso();
+  orderSettings.updatedBy = userId || null;
+  saveOrderSettings();
+}
+
+function buildOrderClosedMessage() {
+  const reasonLine = orderSettings.reason ? `\nAlasan: **${orderSettings.reason}**` : "";
+  return `⛔ Order Robux sedang **CLOSE** oleh staff/owner.${reasonLine}\nSilakan tunggu sampai order dibuka kembali.`;
+}
 
 // ========= TAG SETTINGS =========
 function normalizeTagKeyword(keyword) {
@@ -123,6 +187,33 @@ function displayNameHasRequiredTag(displayName) {
   const keyword = getTagKeywordLower();
 
   return name.includes(keyword);
+}
+
+function cleanDisplayNameForTagExample(displayName) {
+  const keyword = getTagKeywordLower();
+
+  let clean = String(displayName || "DisplayNameKamu")
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(new RegExp(keyword, "ig"), "")
+    .replace(/^[_-]+|[_-]+$/g, "")
+    .replace(/[^a-zA-Z0-9_]/g, "");
+
+  if (!clean) clean = "DisplayNameKamu";
+
+  return clean.slice(0, 32);
+}
+
+function buildTagExampleLines(displayName) {
+  const tagUpper = getTagKeywordUpper();
+  const tagLower = getTagKeywordLower();
+  const cleanName = cleanDisplayNameForTagExample(displayName);
+
+  return [
+    `${tagUpper}_${cleanName}`,
+    `${tagUpper}x${cleanName}`,
+    `${tagLower}${cleanName}`,
+  ];
 }
 
 // ========= ORDER CREATION LOCK =========
@@ -406,7 +497,6 @@ async function checkRobloxGroupEligibility(username) {
 
   if (tagSettings.enabled && !displayNameHasRequiredTag(displayName)) {
     const tagUpper = getTagKeywordUpper();
-    const tagLower = getTagKeywordLower();
 
     return {
       ok: false,
@@ -415,9 +505,7 @@ async function checkRobloxGroupEligibility(username) {
         `Display Name Roblox kamu belum mencantumkan tag map **${tagUpper}**.\n` +
         `Silakan ubah Display Name Roblox kamu terlebih dahulu.\n\n` +
         `Contoh Display Name yang benar:\n` +
-        `• ${tagUpper}_Aura\n` +
-        `• ${tagUpper}xAura\n` +
-        `• ${tagLower}Aura`,
+        buildTagExampleLines(displayName).map((ex) => `• ${ex}`).join("\n"),
       userId,
       robloxUsername: realUsername,
       robloxDisplayName: displayName,
@@ -697,6 +785,11 @@ function buildPanelEmbed() {
     ? `**STATUS STOK:** ${isStockReady() ? "READY" : "HABIS"}`
     : `**STATUS STOK:** (gagal fetch)`;
 
+  const orderLine = `**STATUS ORDER:** ${isOrderOpen() ? "OPEN" : "CLOSE"}`;
+
+  const orderClosedReason =
+    !isOrderOpen() && orderSettings.reason ? `\n**Alasan Close:** ${orderSettings.reason}` : "";
+
   const stockWarn = "";
 
   const stockMeta = stockCache.ok
@@ -709,7 +802,7 @@ function buildPanelEmbed() {
   const tagRequirementLine = tagSettings.enabled
     ? [
         `• Wajib Display Name Roblox mencantumkan tag map **${tagKeyword}**`,
-        `• Contoh Display Name: **${tagKeyword}_Aura**, **${tagKeyword}xAura**, **${tagLower}Aura**`,
+        `• Contoh format: **${tagKeyword}_DisplayNameKamu**, **${tagKeyword}xDisplayNameKamu**, **${tagLower}DisplayNameKamu**`,
       ]
     : ["• Syarat tag map di Display Name Roblox sedang **OFF**"];
 
@@ -717,7 +810,7 @@ function buildPanelEmbed() {
     .setTitle("💸ORDER ROBUX — VIA COMMUNITY PAYOUT")
     .setDescription(
       [
-        stockLine + stockWarn + stockMeta,
+        stockLine + "\n" + orderLine + orderClosedReason + stockWarn + stockMeta,
         "",
         "**Syarat sebelum order**",
         `• Wajib join komunitas Roblox minimal **${ELIGIBLE_DAYS} hari**`,
@@ -760,8 +853,20 @@ function buildStockStatusButton() {
     .setDisabled(true);
 }
 
+function buildOrderStatusButton() {
+  const open = isOrderOpen();
+  const label = open ? "🟢 ORDER: OPEN" : "🔴 ORDER: CLOSE";
+
+  return new ButtonBuilder()
+    .setCustomId("ob_order_status_info")
+    .setLabel(label)
+    .setStyle(open ? ButtonStyle.Success : ButtonStyle.Danger)
+    .setDisabled(true);
+}
+
 function buildPanelComponents() {
   const ready = isStockReady();
+  const open = isOrderOpen();
 
   return [
     new ActionRowBuilder().addComponents(
@@ -769,8 +874,9 @@ function buildPanelComponents() {
         .setCustomId("ob_order_open_modal")
         .setLabel("💸ORDER ROBUX")
         .setStyle(ButtonStyle.Success)
-        .setDisabled(!ready),
-      buildStockStatusButton()
+        .setDisabled(!ready || !open),
+      buildStockStatusButton(),
+      buildOrderStatusButton()
     ),
   ];
 }
@@ -1303,6 +1409,7 @@ async function runAutoCloseSweep(client) {
 // ========= DISCORD CLIENT =========
 loadOrders();
 loadTagSettings();
+loadOrderSettings();
 
 const client = new Client({
   intents: [
@@ -1342,6 +1449,28 @@ client.once("ready", async () => {
       .toJSON(),
 
     new SlashCommandBuilder()
+      .setName("orderrobux")
+      .setDescription("Staff: buka/tutup order Robux manual")
+      .addStringOption((option) =>
+        option
+          .setName("aksi")
+          .setDescription("Pilih aksi")
+          .setRequired(true)
+          .addChoices(
+            { name: "status", value: "STATUS" },
+            { name: "open", value: "OPEN" },
+            { name: "close", value: "CLOSE" }
+          )
+      )
+      .addStringOption((option) =>
+        option
+          .setName("alasan")
+          .setDescription("Alasan close/order info, opsional")
+          .setRequired(false)
+      )
+      .toJSON(),
+
+    new SlashCommandBuilder()
       .setName("tagmap")
       .setDescription("Staff: atur wajib tag map di Display Name Roblox")
       .addStringOption((option) =>
@@ -1365,7 +1494,7 @@ client.once("ready", async () => {
       .toJSON(),
   ]);
 
-  console.log("Slash commands /proses and /tagmap registered.");
+  console.log("Slash commands /proses, /orderrobux and /tagmap registered.");
 
   await syncStockAndPanel(client, { suppressBroadcast: true });
 
@@ -1440,6 +1569,58 @@ client.on("messageCreate", async (msg) => {
 // ========= INTERACTIONS =========
 client.on("interactionCreate", async (i) => {
   try {
+    if (i.isChatInputCommand() && i.commandName === "orderrobux") {
+      const member = await i.guild.members.fetch(i.user.id).catch(() => null);
+
+      if (!isStaff(member)) {
+        return i.reply({ content: "Khusus staff/owner.", ephemeral: true });
+      }
+
+      const aksi = i.options.getString("aksi");
+      const alasan = i.options.getString("alasan") || "";
+
+      if (aksi === "STATUS") {
+        return i.reply({
+          content:
+            `📌 **Status Order Robux**\n` +
+            `Order: **${isOrderOpen() ? "OPEN" : "CLOSE"}**\n` +
+            `Stok: **${isStockReady() ? "READY" : "HABIS"}**\n` +
+            `Alasan: **${orderSettings.reason || "-"}**\n` +
+            `Update terakhir: **${orderSettings.updatedAt ? fmtDateID(orderSettings.updatedAt) + " WIB" : "-"}**`,
+          ephemeral: true,
+        });
+      }
+
+      if (aksi === "OPEN") {
+        setOrderOpenState(true, i.user.id, alasan);
+
+        await refreshPanelMessage(client).catch(() => {});
+
+        return i.reply({
+          content:
+            `✅ Order Robux sudah **OPEN**.\n` +
+            `Catatan: Stok tetap mengikuti payout Roblox. Kalau stok habis, tombol order tetap otomatis nonaktif.`,
+          ephemeral: true,
+        });
+      }
+
+      if (aksi === "CLOSE") {
+        setOrderOpenState(false, i.user.id, alasan);
+
+        await refreshPanelMessage(client).catch(() => {});
+
+        return i.reply({
+          content:
+            `✅ Order Robux sudah **CLOSE**.\n` +
+            `Customer tidak bisa membuat order baru meskipun payout Roblox masih ready.` +
+            `${alasan ? `\nAlasan: **${alasan}**` : ""}`,
+          ephemeral: true,
+        });
+      }
+
+      return i.reply({ content: "Aksi tidak valid.", ephemeral: true });
+    }
+
     if (i.isChatInputCommand() && i.commandName === "tagmap") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
 
@@ -1456,7 +1637,7 @@ client.on("interactionCreate", async (i) => {
             `🏷️ **Status Tag Map**\n` +
             `Status: **${tagSettings.enabled ? "ON" : "OFF"}**\n` +
             `Keyword: **${getTagKeywordUpper()}**\n\n` +
-            `Contoh valid: \`${getTagKeywordUpper()}_Aura\`, \`${getTagKeywordUpper()}xAura\`, \`${getTagKeywordLower()}Aura\``,
+            `Contoh format: \`${getTagKeywordUpper()}_DisplayNameKamu\`, \`${getTagKeywordUpper()}xDisplayNameKamu\`, \`${getTagKeywordLower()}DisplayNameKamu\``,
           ephemeral: true,
         });
       }
@@ -1506,10 +1687,10 @@ client.on("interactionCreate", async (i) => {
           content:
             `✅ Keyword tag map berhasil diganti menjadi **${getTagKeywordUpper()}**.\n` +
             `Status wajib tag map saat ini: **${tagSettings.enabled ? "ON" : "OFF"}**\n\n` +
-            `Contoh valid:\n` +
-            `• ${getTagKeywordUpper()}_Aura\n` +
-            `• ${getTagKeywordUpper()}xAura\n` +
-            `• ${getTagKeywordLower()}Aura`,
+            `Contoh format:\n` +
+            `• ${getTagKeywordUpper()}_DisplayNameKamu\n` +
+            `• ${getTagKeywordUpper()}xDisplayNameKamu\n` +
+            `• ${getTagKeywordLower()}DisplayNameKamu`,
           ephemeral: true,
         });
       }
@@ -1654,6 +1835,13 @@ client.on("interactionCreate", async (i) => {
     if (i.isButton() && i.customId === "ob_order_open_modal") {
       await syncStockAndPanel(client).catch(() => {});
 
+      if (!isOrderOpen()) {
+        return i.reply({
+          content: buildOrderClosedMessage(),
+          ephemeral: true,
+        });
+      }
+
       if (!isStockReady()) {
         return i.reply({
           content: `⛔ Stock HABIS.\nStatus stok saat ini: **HABIS**`,
@@ -1666,6 +1854,13 @@ client.on("interactionCreate", async (i) => {
 
     if (i.isButton() && i.customId === "ob_order_retry_panel") {
       await syncStockAndPanel(client).catch(() => {});
+
+      if (!isOrderOpen()) {
+        return i.reply({
+          content: buildOrderClosedMessage(),
+          ephemeral: true,
+        });
+      }
 
       if (!isStockReady()) {
         return i.reply({
@@ -1683,6 +1878,10 @@ client.on("interactionCreate", async (i) => {
       await i.deferReply({ ephemeral: true });
 
       return withOrderCreationLock(async () => {
+        if (!isOrderOpen()) {
+          return i.editReply(buildOrderClosedMessage());
+        }
+
         const robloxUsernameInput = i.fields
           .getTextInputValue("roblox_username")
           ?.trim()
@@ -1723,11 +1922,11 @@ client.on("interactionCreate", async (i) => {
           return i.editReply("Gagal cek komunitas Roblox/API Roblox. Coba lagi beberapa saat.");
         }
 
-        // KHUSUS GAGAL KARENA DISPLAY NAME TIDAK ADA TAG MAP:
-        // TIDAK BUAT TICKET, BALAS EPHEMERAL DI PANEL SAJA.
         if (!eligibility.ok && eligibility.failType === "TAG_MISSING") {
           const tagUpper = getTagKeywordUpper();
-          const tagLower = getTagKeywordLower();
+          const exampleLines = buildTagExampleLines(eligibility.robloxDisplayName || robloxUsernameInput)
+            .map((ex) => `• **${ex}**`)
+            .join("\n");
 
           return i.editReply({
             content:
@@ -1736,10 +1935,8 @@ client.on("interactionCreate", async (i) => {
               `👤 **Username Roblox:** \`${eligibility.robloxUsername || robloxUsernameInput}\`\n` +
               `🏷️ **Display Name saat ini:** \`${eligibility.robloxDisplayName || "-"}\`\n\n` +
               `Silakan ubah Display Name Roblox kamu terlebih dahulu.\n\n` +
-              `Contoh Display Name yang benar:\n` +
-              `• **${tagUpper}_Aura**\n` +
-              `• **${tagUpper}xAura**\n` +
-              `• **${tagLower}Aura**\n\n` +
+              `Contoh Display Name yang benar sesuai Display Name kamu:\n` +
+              `${exampleLines}\n\n` +
               `Jika sudah diganti, klik tombol **Order Robux Ulang** di bawah ini.`,
             components: buildPanelRetryButton(),
           });
@@ -1921,6 +2118,13 @@ client.on("interactionCreate", async (i) => {
       }
 
       await syncStockAndPanel(client).catch(() => {});
+
+      if (!isOrderOpen()) {
+        return i.reply({
+          content: buildOrderClosedMessage(),
+          ephemeral: true,
+        });
+      }
 
       if (!isStockReady()) {
         return i.reply({
