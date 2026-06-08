@@ -148,6 +148,7 @@ async function withOrderCreationLock(task) {
 function loadOrders() {
   try {
     if (!fs.existsSync(DATA_FILE)) return;
+
     const raw = fs.readFileSync(DATA_FILE, "utf-8");
     const arr = JSON.parse(raw);
 
@@ -738,7 +739,7 @@ function buildPanelEmbed() {
         tagSettings.enabled
           ? `4) Bot cek Display Name Roblox wajib ada tag **${tagKeyword}**`
           : "4) Bot cek data Roblox",
-        "5) Ticket dibuat otomatis",
+        "5) Ticket dibuat otomatis jika memenuhi pengecekan awal",
         "6) Customer pilih **Bank Transfer**",
         "7) Customer transfer lalu kirim **bukti transfer** di ticket",
         "",
@@ -770,6 +771,17 @@ function buildPanelComponents() {
         .setStyle(ButtonStyle.Success)
         .setDisabled(!ready),
       buildStockStatusButton()
+    ),
+  ];
+}
+
+function buildPanelRetryButton() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("ob_order_retry_panel")
+        .setLabel("🔁 Order Robux Ulang")
+        .setStyle(ButtonStyle.Success)
     ),
   ];
 }
@@ -1256,8 +1268,7 @@ async function runAutoCloseSweep(client) {
         await deleteTicketChannel(
           ch,
           order,
-          `🔒 Ticket ineligible ditutup otomatis setelah ${AUTO_CLOSE_MINUTES} menit. ` +
-            `Ticket akan dihapus...`,
+          `🔒 Ticket ineligible ditutup otomatis setelah ${AUTO_CLOSE_MINUTES} menit. Ticket akan dihapus...`,
           "INELIGIBLE"
         );
         continue;
@@ -1653,6 +1664,21 @@ client.on("interactionCreate", async (i) => {
       return i.showModal(buildOrderModal());
     }
 
+    if (i.isButton() && i.customId === "ob_order_retry_panel") {
+      await syncStockAndPanel(client).catch(() => {});
+
+      if (!isStockReady()) {
+        return i.reply({
+          content:
+            "⛔ Stok Robux sedang **HABIS**.\n" +
+            "Silakan tunggu update stok ready, lalu klik tombol order lagi.",
+          ephemeral: true,
+        });
+      }
+
+      return i.showModal(buildOrderModal());
+    }
+
     if (i.isModalSubmit() && i.customId === "ob_order_modal_submit") {
       await i.deferReply({ ephemeral: true });
 
@@ -1695,6 +1721,28 @@ client.on("interactionCreate", async (i) => {
         } catch (e) {
           console.error("Roblox check error:", e);
           return i.editReply("Gagal cek komunitas Roblox/API Roblox. Coba lagi beberapa saat.");
+        }
+
+        // KHUSUS GAGAL KARENA DISPLAY NAME TIDAK ADA TAG MAP:
+        // TIDAK BUAT TICKET, BALAS EPHEMERAL DI PANEL SAJA.
+        if (!eligibility.ok && eligibility.failType === "TAG_MISSING") {
+          const tagUpper = getTagKeywordUpper();
+          const tagLower = getTagKeywordLower();
+
+          return i.editReply({
+            content:
+              `❌ **Order gagal.**\n\n` +
+              `Display Name Roblox kamu belum mencantumkan tag map **${tagUpper}**.\n\n` +
+              `👤 **Username Roblox:** \`${eligibility.robloxUsername || robloxUsernameInput}\`\n` +
+              `🏷️ **Display Name saat ini:** \`${eligibility.robloxDisplayName || "-"}\`\n\n` +
+              `Silakan ubah Display Name Roblox kamu terlebih dahulu.\n\n` +
+              `Contoh Display Name yang benar:\n` +
+              `• **${tagUpper}_Aura**\n` +
+              `• **${tagUpper}xAura**\n` +
+              `• **${tagLower}Aura**\n\n` +
+              `Jika sudah diganti, klik tombol **Order Robux Ulang** di bawah ini.`,
+            components: buildPanelRetryButton(),
+          });
         }
 
         const orderId = newOrderId();
