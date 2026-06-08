@@ -1084,6 +1084,67 @@ function buildStockOutBroadcastEmbed() {
     .setTimestamp();
 }
 
+function buildRedeployStockBroadcastEmbed() {
+  const stockStatus = stockCache.ok ? (isStockReady() ? "READY" : "HABIS") : "GAGAL FETCH";
+  const orderStatus = isOrderOpen() ? "OPEN" : "CLOSE";
+
+  return new EmbedBuilder()
+    .setColor(isOrderOpen() && isStockReady() ? 0x00ff95 : 0xffb703)
+    .setTitle("🔄 BOT REDEPLOY / ONLINE LAGI")
+    .setDescription(
+      [
+        "✅ **Bot berhasil online lagi setelah redeploy Railway.**",
+        "",
+        `📌 **Status Order:** ${orderStatus}`,
+        `📦 **Status Stok:** ${stockStatus}`,
+        `💰 **Group Funds:** ${stockCache.ok ? `${fmtIDR(stockCache.groupFunds)} Robux` : "-"}`,
+        `🔒 **Reserved Order:** ${stockCache.ok ? `${fmtIDR(stockCache.reserved)} Robux` : "-"}`,
+        `✅ **Available:** ${stockCache.ok ? `${fmtIDR(stockCache.available)} Robux` : "-"}`,
+        "",
+        stockCache.ok
+          ? isOrderOpen() && isStockReady()
+            ? `🛒 Customer bisa order di <#${PANEL_CHANNEL_ID}>.`
+            : isOrderOpen() && !isStockReady()
+              ? "⛔ Order masih OPEN, tapi stok belum cukup untuk order minimal 1.000 Robux."
+              : "🔒 Order sedang CLOSE manual. Tombol order dimatikan."
+          : `⚠️ Gagal cek stok Roblox: ${stockCache.error || "Unknown error"}`,
+      ].join("\n")
+    )
+    .setFooter({ text: "UNDERCOVER — Railway Redeploy Stock Update" })
+    .setTimestamp();
+}
+
+function buildOrderManualBroadcastEmbed(aksi, staffUser) {
+  const isOpenAction = aksi === "OPEN";
+  const stockStatus = stockCache.ok ? (isStockReady() ? "READY" : "HABIS") : "GAGAL FETCH";
+
+  return new EmbedBuilder()
+    .setColor(isOpenAction ? 0x00ff95 : 0xff2e63)
+    .setTitle(isOpenAction ? "✅ ORDER ROBUX DIBUKA" : "🔒 ORDER ROBUX DITUTUP")
+    .setDescription(
+      [
+        isOpenAction
+          ? "🚀 **Order Robux sudah dibuka oleh staff.**"
+          : "⛔ **Order Robux ditutup manual oleh staff.**",
+        "",
+        `👮 **Staff:** ${staffUser ? `<@${staffUser.id}>` : "-"}`,
+        `📌 **Status Order:** ${isOrderOpen() ? "OPEN" : "CLOSE"}`,
+        `📦 **Status Stok:** ${stockStatus}`,
+        `💰 **Group Funds:** ${stockCache.ok ? `${fmtIDR(stockCache.groupFunds)} Robux` : "-"}`,
+        `🔒 **Reserved Order:** ${stockCache.ok ? `${fmtIDR(stockCache.reserved)} Robux` : "-"}`,
+        `✅ **Available:** ${stockCache.ok ? `${fmtIDR(stockCache.available)} Robux` : "-"}`,
+        "",
+        isOpenAction
+          ? isStockReady()
+            ? `🛒 Customer bisa langsung order di <#${PANEL_CHANNEL_ID}>.`
+            : "⚠️ Order sudah OPEN, tapi stok belum cukup untuk order minimal 1.000 Robux."
+          : "📌 Tombol order dimatikan meskipun payout Roblox ready.",
+      ].join("\n")
+    )
+    .setFooter({ text: "UNDERCOVER — Manual Order Update" })
+    .setTimestamp();
+}
+
 function buildStockBroadcastButtons() {
   return [
     new ActionRowBuilder().addComponents(
@@ -1093,6 +1154,48 @@ function buildStockBroadcastButtons() {
         .setURL(getPanelUrl())
     ),
   ];
+}
+
+async function sendUpdateStockChannelMessage(client, embed, options = {}) {
+  try {
+    const { mentionEveryone = false, withOrderButton = true } = options;
+
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const channel = await guild.channels.fetch(UPDATE_STOCK_CHANNEL_ID);
+
+    if (!channel) return;
+
+    if (
+      channel.type !== ChannelType.GuildText &&
+      channel.type !== ChannelType.GuildAnnouncement
+    ) {
+      console.error("UPDATE_STOCK_CHANNEL_ID must be a text or announcement channel.");
+      return;
+    }
+
+    await channel.send({
+      content: mentionEveryone ? "🚨 @everyone" : undefined,
+      embeds: [embed],
+      components: withOrderButton ? buildStockBroadcastButtons() : [],
+      allowedMentions: mentionEveryone ? { parse: ["everyone"] } : { parse: [] },
+    });
+  } catch (e) {
+    console.error("sendUpdateStockChannelMessage error:", e);
+  }
+}
+
+async function sendRedeployStockBroadcast(client) {
+  await sendUpdateStockChannelMessage(client, buildRedeployStockBroadcastEmbed(), {
+    mentionEveryone: false,
+    withOrderButton: true,
+  });
+}
+
+async function sendManualOrderBroadcast(client, aksi, staffUser) {
+  await sendUpdateStockChannelMessage(client, buildOrderManualBroadcastEmbed(aksi, staffUser), {
+    mentionEveryone: true,
+    withOrderButton: true,
+  });
 }
 
 function buildTestimoniEmbed(order, customerUser, staffUser) {
@@ -1157,39 +1260,12 @@ async function sendTestimoniMessage(client, order, staffUser) {
 }
 
 async function sendAutoStockBroadcast(client, mode) {
-  try {
-    const guild = await client.guilds.fetch(GUILD_ID);
-    const channel = await guild.channels.fetch(UPDATE_STOCK_CHANNEL_ID);
+  const embed = mode === "OUT" ? buildStockOutBroadcastEmbed() : buildStockReadyBroadcastEmbed();
 
-    if (!channel) return;
-
-    if (
-      channel.type !== ChannelType.GuildText &&
-      channel.type !== ChannelType.GuildAnnouncement
-    ) {
-      console.error("UPDATE_STOCK_CHANNEL_ID must be a text or announcement channel.");
-      return;
-    }
-
-    const payload =
-      mode === "OUT"
-        ? {
-            content: "🚨 @everyone",
-            embeds: [buildStockOutBroadcastEmbed()],
-            components: buildStockBroadcastButtons(),
-            allowedMentions: { parse: ["everyone"] },
-          }
-        : {
-            content: "🚨 @everyone",
-            embeds: [buildStockReadyBroadcastEmbed()],
-            components: buildStockBroadcastButtons(),
-            allowedMentions: { parse: ["everyone"] },
-          };
-
-    await channel.send(payload);
-  } catch (e) {
-    console.error("sendAutoStockBroadcast error:", e);
-  }
+  await sendUpdateStockChannelMessage(client, embed, {
+    mentionEveryone: true,
+    withOrderButton: true,
+  });
 }
 
 async function maybeBroadcastStockChange(client, refreshResult, options = {}) {
@@ -1453,6 +1529,7 @@ client.once("ready", async () => {
   console.log("Slash commands /proses, /tagmap, and /order registered.");
 
   await syncStockAndPanel(client, { suppressBroadcast: true });
+  await sendRedeployStockBroadcast(client).catch(() => {});
 
   setInterval(async () => {
     try {
@@ -1513,7 +1590,7 @@ client.on("messageCreate", async (msg) => {
         .send(
           `✅ Bukti pembayaran diterima dari <@${order.userId}>.\n` +
             `📎 Tipe bukti: **file/forward**\n` +
-            `👮‍♂️ Staff/Owner akan proses Robux kamu, mohon bersedia menunggu...`
+            `👮‍♂️ Staff/Owner akan proses Robux kamu, mohon bersedia menunggu.`
         )
         .catch(() => {});
     }
@@ -1548,10 +1625,12 @@ client.on("interactionCreate", async (i) => {
         orderSettings.open = true;
         saveOrderSettings();
 
-        await refreshPanelMessage(client).catch(() => {});
+        await syncStockAndPanel(client, { suppressBroadcast: true }).catch(() => {});
+        await sendManualOrderBroadcast(client, "OPEN", i.user).catch(() => {});
 
         return i.reply({
-          content: "✅ Order Robux sudah **DIBUKA**. Customer bisa order jika stok ready.",
+          content:
+            "✅ Order Robux sudah **DIBUKA**. Info update order/stok sudah dikirim ke channel update stock.",
           ephemeral: true,
         });
       }
@@ -1560,11 +1639,12 @@ client.on("interactionCreate", async (i) => {
         orderSettings.open = false;
         saveOrderSettings();
 
-        await refreshPanelMessage(client).catch(() => {});
+        await syncStockAndPanel(client, { suppressBroadcast: true }).catch(() => {});
+        await sendManualOrderBroadcast(client, "CLOSE", i.user).catch(() => {});
 
         return i.reply({
           content:
-            "🔒 Order Robux sudah **DITUTUP MANUAL**. Tombol order akan mati meskipun payout Roblox ready.",
+            "🔒 Order Robux sudah **DITUTUP MANUAL**. Info update order/stok sudah dikirim ke channel update stock.",
           ephemeral: true,
         });
       }
@@ -2230,13 +2310,16 @@ client.on("interactionCreate", async (i) => {
       }
 
       await i.reply({
-        content: "🔒 Ticket akan dihapus dalam 3 detik...",
+        content: "🔒 Ticket akan ditutup dan dihapus dalam 3 detik...",
         ephemeral: true,
       });
 
-      await deleteTicketChannel(i.channel, order, "🔒 Ticket ditutup. Ticket akan dihapus...", "CLOSED");
-
-      await syncStockAndPanel(client).catch(() => {});
+      await deleteTicketChannel(
+        i.channel,
+        order,
+        "🔒 Ticket ditutup. Channel akan dihapus...",
+        "CLOSED"
+      );
 
       return;
     }
@@ -2252,44 +2335,32 @@ client.on("interactionCreate", async (i) => {
         });
       }
 
-      order.status = "CLOSED";
-      order.closedAt = nowIso();
-      order.autoCloseEnabled = false;
-      order.autoClosePaused = false;
-      order.autoCloseDeadlineAt = null;
-
-      orders.set(order.orderId, order);
-      saveOrders();
-
-      await syncStockAndPanel(client).catch(() => {});
-
       await i.reply({
-        content: "🔒 Ticket akan dihapus dalam 3 detik...",
+        content: "🔒 Ticket akan ditutup dan dihapus dalam 3 detik...",
         ephemeral: true,
       });
 
       await deleteTicketChannel(
         i.channel,
         order,
-        "🔒 Ticket ditutup (ineligible). Ticket akan dihapus...",
-        "CLOSED"
+        "🔒 Ticket ineligible ditutup. Channel akan dihapus...",
+        "INELIGIBLE"
       );
 
       return;
     }
   } catch (e) {
-    console.error("interaction error:", e?.stack || e);
+    console.error("interactionCreate error:", e);
 
-    if (i.deferred || i.replied) {
-      await i.followUp({
-        content: "Terjadi error. Coba lagi.",
-        ephemeral: true,
-      }).catch(() => {});
-    } else {
-      await i.reply({
-        content: "Terjadi error. Coba lagi.",
-        ephemeral: true,
-      }).catch(() => {});
+    if (i.isRepliable()) {
+      if (i.deferred || i.replied) {
+        await i.editReply("Terjadi error internal. Cek console/log bot.").catch(() => {});
+      } else {
+        await i.reply({
+          content: "Terjadi error internal. Cek console/log bot.",
+          ephemeral: true,
+        }).catch(() => {});
+      }
     }
   }
 });
