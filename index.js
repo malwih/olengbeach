@@ -886,19 +886,19 @@ function buildOrderModal() {
 
   const username = new TextInputBuilder()
     .setCustomId("roblox_username")
-    .setLabel("Username Roblox, bukan Display Name")
+    .setLabel("Username Roblox (tanpa @, bukan Display Name)")
     .setStyle(TextInputStyle.Short)
     .setRequired(true);
 
   const qty = new TextInputBuilder()
     .setCustomId("qty")
-    .setLabel("Jumlah, minimal 1000 dan kelipatan 1000")
+    .setLabel("Jumlah (min. 1000 dan kelipatan 1000)")
     .setStyle(TextInputStyle.Short)
     .setRequired(true);
 
   const note = new TextInputBuilder()
     .setCustomId("note")
-    .setLabel("Catatan tambahan, opsional")
+    .setLabel("Catatan (opsional)")
     .setStyle(TextInputStyle.Paragraph)
     .setRequired(false);
 
