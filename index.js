@@ -56,10 +56,76 @@ if (!ROBLOX_COOKIE) throw new Error("Missing ROBLOX_COOKIE (.ROBLOSECURITY)");
 
 // ========= STORAGE =========
 const DATA_FILE = path.resolve("./orders.json");
+const TAG_SETTINGS_FILE = path.resolve("./tag_settings.json");
+
 /** @type {Map<string, any>} */
 const orders = new Map();
 
-// ========= ORDER CREATION LOCK (ANTI RACE CONDITION) =========
+let tagSettings = {
+  enabled: true,
+  keyword: "UCVR",
+};
+
+// ========= TAG SETTINGS =========
+function normalizeTagKeyword(keyword) {
+  return String(keyword || "")
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/[^a-zA-Z0-9_-]/g, "");
+}
+
+function loadTagSettings() {
+  try {
+    if (!fs.existsSync(TAG_SETTINGS_FILE)) {
+      saveTagSettings();
+      return;
+    }
+
+    const raw = fs.readFileSync(TAG_SETTINGS_FILE, "utf-8");
+    const json = JSON.parse(raw);
+
+    tagSettings = {
+      enabled: typeof json.enabled === "boolean" ? json.enabled : true,
+      keyword: normalizeTagKeyword(json.keyword || "UCVR") || "UCVR",
+    };
+
+    saveTagSettings();
+  } catch (e) {
+    console.error("Failed to load tag_settings.json:", e);
+    tagSettings = {
+      enabled: true,
+      keyword: "UCVR",
+    };
+    saveTagSettings();
+  }
+}
+
+function saveTagSettings() {
+  try {
+    fs.writeFileSync(TAG_SETTINGS_FILE, JSON.stringify(tagSettings, null, 2));
+  } catch (e) {
+    console.error("Failed to save tag_settings.json:", e);
+  }
+}
+
+function getTagKeywordUpper() {
+  return String(tagSettings.keyword || "UCVR").toUpperCase();
+}
+
+function getTagKeywordLower() {
+  return String(tagSettings.keyword || "ucvr").toLowerCase();
+}
+
+function displayNameHasRequiredTag(displayName) {
+  if (!tagSettings.enabled) return true;
+
+  const name = String(displayName || "").toLowerCase();
+  const keyword = getTagKeywordLower();
+
+  return name.includes(keyword);
+}
+
+// ========= ORDER CREATION LOCK =========
 let orderCreationLock = Promise.resolve();
 
 async function withOrderCreationLock(task) {
@@ -84,6 +150,7 @@ function loadOrders() {
     if (!fs.existsSync(DATA_FILE)) return;
     const raw = fs.readFileSync(DATA_FILE, "utf-8");
     const arr = JSON.parse(raw);
+
     if (Array.isArray(arr)) {
       for (const o of arr) {
         normalizeLoadedOrder(o);
@@ -225,8 +292,34 @@ async function robloxUsernameToUserId(username) {
 
   const json = await r.json();
   const data = json?.data?.[0];
+
   if (!data?.id) return null;
-  return data.id;
+
+  return {
+    id: data.id,
+    name: data.name || username,
+    displayName: data.displayName || data.name || username,
+  };
+}
+
+async function robloxGetUserInfo(userId) {
+  const r = await fetch(`https://users.roblox.com/v1/users/${userId}`, {
+    method: "GET",
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`Roblox user info failed: ${r.status} ${t}`);
+  }
+
+  const json = await r.json();
+
+  return {
+    id: json?.id || userId,
+    name: json?.name || "",
+    displayName: json?.displayName || json?.name || "",
+  };
 }
 
 async function robloxGetGroupMembershipForUser(groupId, userId) {
@@ -244,6 +337,7 @@ async function robloxGetGroupMembershipForUser(groupId, userId) {
   }
 
   const json = await r.json();
+
   const memberships =
     json?.groupMemberships ||
     json?.memberships ||
@@ -252,6 +346,7 @@ async function robloxGetGroupMembershipForUser(groupId, userId) {
     [];
 
   if (!Array.isArray(memberships) || memberships.length === 0) return null;
+
   return memberships[0];
 }
 
@@ -267,39 +362,108 @@ function extractMembershipJoinTime(membership) {
   ].filter(Boolean);
 
   if (candidates.length === 0) return null;
+
   const dt = new Date(candidates[0]);
   if (isNaN(dt.getTime())) return null;
+
   return dt.toISOString();
 }
 
 async function checkRobloxGroupEligibility(username) {
   const clean = String(username || "").trim().replace(/^@/, "");
-  if (!clean) return { ok: false, reason: "Username kosong." };
 
-  const userId = await robloxUsernameToUserId(clean);
-  if (!userId) return { ok: false, reason: "Username Roblox tidak ditemukan." };
-
-  const membership = await robloxGetGroupMembershipForUser(ROBLOX_GROUP_ID, userId);
-  if (!membership) {
+  if (!clean) {
     return {
       ok: false,
-      reason: "User belum join komunitas Roblox (Group).",
+      failType: "USERNAME_EMPTY",
+      reason: "Username kosong.",
+    };
+  }
+
+  const usernameLookup = await robloxUsernameToUserId(clean);
+
+  if (!usernameLookup?.id) {
+    return {
+      ok: false,
+      failType: "USERNAME_NOT_FOUND",
+      reason: "Username Roblox tidak ditemukan.",
+    };
+  }
+
+  const userId = usernameLookup.id;
+
+  let userInfo = usernameLookup;
+
+  try {
+    userInfo = await robloxGetUserInfo(userId);
+  } catch (e) {
+    console.error("robloxGetUserInfo error:", e);
+  }
+
+  const displayName = userInfo?.displayName || usernameLookup?.displayName || clean;
+  const realUsername = userInfo?.name || usernameLookup?.name || clean;
+
+  if (tagSettings.enabled && !displayNameHasRequiredTag(displayName)) {
+    const tagUpper = getTagKeywordUpper();
+    const tagLower = getTagKeywordLower();
+
+    return {
+      ok: false,
+      failType: "TAG_MISSING",
+      reason:
+        `Display Name Roblox kamu belum mencantumkan tag map **${tagUpper}**.\n` +
+        `Silakan ubah Display Name Roblox kamu terlebih dahulu.\n\n` +
+        `Contoh Display Name yang benar:\n` +
+        `• ${tagUpper}_Aura\n` +
+        `• ${tagUpper}xAura\n` +
+        `• ${tagLower}Aura`,
       userId,
+      robloxUsername: realUsername,
+      robloxDisplayName: displayName,
       joinTime: null,
       daysInGroup: 0,
       isMember: false,
+      tagKeyword: tagSettings.keyword,
+      tagRequired: true,
+      tagValid: false,
+    };
+  }
+
+  const membership = await robloxGetGroupMembershipForUser(ROBLOX_GROUP_ID, userId);
+
+  if (!membership) {
+    return {
+      ok: false,
+      failType: "NOT_IN_GROUP",
+      reason: "User belum join komunitas Roblox (Group).",
+      userId,
+      robloxUsername: realUsername,
+      robloxDisplayName: displayName,
+      joinTime: null,
+      daysInGroup: 0,
+      isMember: false,
+      tagKeyword: tagSettings.keyword,
+      tagRequired: tagSettings.enabled,
+      tagValid: true,
     };
   }
 
   const joinTimeIso = extractMembershipJoinTime(membership);
+
   if (!joinTimeIso) {
     return {
       ok: false,
+      failType: "JOIN_TIME_MISSING",
       reason: "User member, tapi API tidak mengembalikan tanggal join. Tidak bisa validasi 14 hari.",
       userId,
+      robloxUsername: realUsername,
+      robloxDisplayName: displayName,
       joinTime: null,
       daysInGroup: null,
       isMember: true,
+      tagKeyword: tagSettings.keyword,
+      tagRequired: tagSettings.enabled,
+      tagValid: true,
     };
   }
 
@@ -309,17 +473,23 @@ async function checkRobloxGroupEligibility(username) {
 
   return {
     ok: eligible,
+    failType: eligible ? null : "DAYS_NOT_ENOUGH",
     reason: eligible
       ? "Eligible."
       : `Belum ${ELIGIBLE_DAYS} hari join komunitas. Baru ${daysInGroup} hari.`,
     userId,
+    robloxUsername: realUsername,
+    robloxDisplayName: displayName,
     joinTime: joinTimeIso,
     daysInGroup,
     isMember: true,
+    tagKeyword: tagSettings.keyword,
+    tagRequired: tagSettings.enabled,
+    tagValid: true,
   };
 }
 
-// ========= AUTO STOCK (GROUP FUNDS) =========
+// ========= AUTO STOCK =========
 async function robloxGetGroupFunds(groupId) {
   const url = `https://economy.roblox.com/v1/groups/${groupId}/currency`;
 
@@ -338,9 +508,11 @@ async function robloxGetGroupFunds(groupId) {
 
   const json = await r.json();
   const robux = Number(json?.robux);
+
   if (!Number.isFinite(robux)) {
     throw new Error("Roblox group funds invalid response (missing robux).");
   }
+
   return robux;
 }
 
@@ -376,7 +548,7 @@ let stockCache = {
 const stockBroadcastState = {
   initialized: false,
   lastObservedAvailable: null,
-  lastObservedMode: null, // READY | OUT
+  lastObservedMode: null,
 };
 
 async function refreshStockCache() {
@@ -418,7 +590,7 @@ function getStockBroadcastMode(available) {
   return Number(available || 0) >= 1000 ? "READY" : "OUT";
 }
 
-// ========= INVOICE (PDF) =========
+// ========= INVOICE PDF =========
 function ensureDir(p) {
   if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
 }
@@ -434,6 +606,7 @@ function createInvoicePdf(order, staffUser) {
 
       const doc = new PDFDocument({ size: "A4", margin: 48 });
       const stream = fs.createWriteStream(filePath);
+
       doc.pipe(stream);
 
       doc.fontSize(20).text(`${STORE_NAME}`, { align: "left" });
@@ -442,12 +615,14 @@ function createInvoicePdf(order, staffUser) {
       doc.moveDown(1);
 
       const createdAt = order.doneAt || nowIso();
+
       doc.fontSize(11);
       doc.text(`Invoice No : INV-${order.orderId}`);
       doc.text(`Order ID   : ${order.orderId}`);
       doc.text(`Tanggal    : ${fmtDateID(createdAt)} WIB`);
       doc.text(`Customer   : <@${order.userId}>`);
       doc.text(`Roblox User : ${order.robloxUsername || "-"}`);
+      doc.text(`Display Name: ${order.robloxDisplayName || "-"}`);
       doc.text(`Metode Bayar: Bank Transfer (SeaBank)`);
       doc.text(`Diproses oleh: ${staffUser?.tag || staffUser?.username || staffUser?.id || "-"}`);
       doc.moveDown(1);
@@ -494,6 +669,7 @@ function createInvoicePdf(order, staffUser) {
 
 function buildInvoiceEmbed(order) {
   const dt = order.doneAt || nowIso();
+
   return new EmbedBuilder()
     .setTitle(`🧾 INVOICE — ${order.orderId}`)
     .setDescription(
@@ -502,7 +678,8 @@ function buildInvoiceEmbed(order) {
         `**Tanggal:** ${fmtDateID(dt)} WIB`,
         "",
         `👤 **Discord:** <@${order.userId}>`,
-        `🎮 **Roblox:** \`${order.robloxUsername}\``,
+        `🎮 **Roblox Username:** \`${order.robloxUsername}\``,
+        `🏷️ **Display Name:** \`${order.robloxDisplayName || "-"}\``,
         "",
         `💎 **Robux:** ${fmtIDR(order.qty)}`,
         `💰 **Total:** Rp ${fmtIDR(order.total)}`,
@@ -525,6 +702,16 @@ function buildPanelEmbed() {
     ? `\n_Updated: ${fmtDateID(stockCache.updatedAt)} WIB_`
     : `\n_Updated: ${fmtDateID(stockCache.updatedAt)} WIB | Error: ${stockCache.error}_`;
 
+  const tagKeyword = getTagKeywordUpper();
+  const tagLower = getTagKeywordLower();
+
+  const tagRequirementLine = tagSettings.enabled
+    ? [
+        `• Wajib Display Name Roblox mencantumkan tag map **${tagKeyword}**`,
+        `• Contoh Display Name: **${tagKeyword}_Aura**, **${tagKeyword}xAura**, **${tagLower}Aura**`,
+      ]
+    : ["• Syarat tag map di Display Name Roblox sedang **OFF**"];
+
   return new EmbedBuilder()
     .setTitle("💸ORDER ROBUX — VIA COMMUNITY PAYOUT")
     .setDescription(
@@ -533,6 +720,7 @@ function buildPanelEmbed() {
         "",
         "**Syarat sebelum order**",
         `• Wajib join komunitas Roblox minimal **${ELIGIBLE_DAYS} hari**`,
+        ...tagRequirementLine,
         "• Link komunitas: https://www.roblox.com/share/g/819348691",
         "",
         "💰 **PRICE LIST ROBUX**",
@@ -547,9 +735,12 @@ function buildPanelEmbed() {
         "1) Klik tombol **ORDER ROBUX** di bawah",
         "2) Isi **Username Roblox** & **Jumlah**",
         "3) Bot cek join komunitas Roblox",
-        "4) Ticket dibuat otomatis",
-        "5) Staff kirim intruksi **Pembayaran** → customer pilih **Bank Transfer**",
-        "6) Customer transfer lalu kirim **bukti transfer** di ticket",
+        tagSettings.enabled
+          ? `4) Bot cek Display Name Roblox wajib ada tag **${tagKeyword}**`
+          : "4) Bot cek data Roblox",
+        "5) Ticket dibuat otomatis",
+        "6) Customer pilih **Bank Transfer**",
+        "7) Customer transfer lalu kirim **bukti transfer** di ticket",
         "",
         "⚠️ **PENTING — JANGAN TRANSFER sebelum instruksi pembayaran muncul!**",
       ].join("\n")
@@ -570,6 +761,7 @@ function buildStockStatusButton() {
 
 function buildPanelComponents() {
   const ready = isStockReady();
+
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -586,6 +778,7 @@ async function refreshPanelMessage(client) {
   try {
     const guild = await client.guilds.fetch(GUILD_ID);
     const channel = await guild.channels.fetch(PANEL_CHANNEL_ID);
+
     if (!channel || channel.type !== ChannelType.GuildText) return;
 
     const embed = buildPanelEmbed();
@@ -613,19 +806,19 @@ function buildOrderModal() {
 
   const username = new TextInputBuilder()
     .setCustomId("roblox_username")
-    .setLabel("Username Roblox (tanpa @, bukan Display Name)")
+    .setLabel("Username Roblox, bukan Display Name")
     .setStyle(TextInputStyle.Short)
     .setRequired(true);
 
   const qty = new TextInputBuilder()
     .setCustomId("qty")
-    .setLabel("Jumlah (minimal 1000, kelipatan 1000)")
+    .setLabel("Jumlah, minimal 1000 dan kelipatan 1000")
     .setStyle(TextInputStyle.Short)
     .setRequired(true);
 
   const note = new TextInputBuilder()
     .setCustomId("note")
-    .setLabel("Catatan tambahan (opsional)")
+    .setLabel("Catatan tambahan, opsional")
     .setStyle(TextInputStyle.Paragraph)
     .setRequired(false);
 
@@ -646,11 +839,21 @@ function buildCustomerStatusEmbed(order) {
     ? `✅ Eligible — **${days}/${ELIGIBLE_DAYS} hari**`
     : `❌ Tidak eligible — **${days}/${ELIGIBLE_DAYS} hari**`;
 
+  const tagUpper = String(order.tagKeyword || tagSettings.keyword || "UCVR").toUpperCase();
+
+  const tagLine = order.tagRequired
+    ? order.tagValid
+      ? `✅ Display Name mengandung tag **${tagUpper}**`
+      : `❌ Display Name belum mengandung tag **${tagUpper}**`
+    : "ℹ️ Syarat tag map sedang OFF";
+
   const desc = order.robloxEligible
     ? [
         `👤 **Username Roblox:** \`${order.robloxUsername}\``,
+        `🏷️ **Display Name:** \`${order.robloxDisplayName || "-"}\``,
         "",
         `📊 **Status Join Community:** ${eligibleLine}`,
+        `🏷️ **Status Tag Map:** ${tagLine}`,
         `📅 **Tanggal Join:** ${joinLine}`,
         "",
         `💎 **Total Robux:** ${fmtIDR(order.qty)}`,
@@ -661,14 +864,16 @@ function buildCustomerStatusEmbed(order) {
       ].join("\n")
     : [
         `👤 **Username Roblox:** \`${order.robloxUsername}\``,
+        `🏷️ **Display Name:** \`${order.robloxDisplayName || "-"}\``,
         "",
         `📊 **Status Join Community:** ${eligibleLine}`,
+        `🏷️ **Status Tag Map:** ${tagLine}`,
         `📅 **Tanggal Join:** ${joinLine}`,
         "",
-        `⚠️ Alasan: ${order.ineligibleReason || "Belum memenuhi syarat."}`,
+        `⚠️ **Alasan:** ${order.ineligibleReason || "Belum memenuhi syarat."}`,
         "",
-        `⏳ Ticket ini akan otomatis ditutup setelah **${AUTO_CLOSE_MINUTES} menit** meskipun ada chat atau file yang dikirim.`,
-        "Silakan join komunitas sampai memenuhi syarat, lalu order ulang.",
+        `⏳ Ticket ini akan otomatis ditutup setelah **${AUTO_CLOSE_MINUTES} menit**.`,
+        "Jika sudah memperbaiki syaratnya, klik tombol **Order Robux Ulang** di bawah.",
       ].join("\n");
 
   return new EmbedBuilder()
@@ -713,6 +918,10 @@ function buildButtonsAfterDone(orderId) {
 function buildCustomerButtonsIneligible(orderId) {
   return [
     new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`ob_order_retry:${orderId}`)
+        .setLabel("🔁 Order Robux Ulang")
+        .setStyle(ButtonStyle.Success),
       new ButtonBuilder()
         .setCustomId(`ob_close_ineligible:${orderId}`)
         .setLabel("🔒 Close Ticket")
@@ -825,6 +1034,7 @@ function buildTestimoniEmbed(order, customerUser, staffUser) {
         "",
         `👤 **Customer Discord** : ${customerUser ? `<@${customerUser.id}>` : `<@${order.userId}>`}`,
         `🎮 **Username Roblox** : \`${order.robloxUsername}\``,
+        `🏷️ **Display Name**     : \`${order.robloxDisplayName || "-"}\``,
         `💎 **Jumlah Robux**    : **${fmtIDR(order.qty)} Robux**`,
         `💰 **Total Bayar**     : **Rp ${fmtIDR(order.total)}**`,
         `🧾 **Order ID**        : \`${order.orderId}\``,
@@ -846,6 +1056,7 @@ async function sendTestimoniMessage(client, order, staffUser) {
     const channel = await guild.channels.fetch(TESTIMONI_CHANNEL_ID);
 
     if (!channel) return;
+
     if (
       channel.type !== ChannelType.GuildText &&
       channel.type !== ChannelType.GuildAnnouncement
@@ -871,6 +1082,7 @@ async function sendAutoStockBroadcast(client, mode) {
     const channel = await guild.channels.fetch(UPDATE_STOCK_CHANNEL_ID);
 
     if (!channel) return;
+
     if (
       channel.type !== ChannelType.GuildText &&
       channel.type !== ChannelType.GuildAnnouncement
@@ -945,6 +1157,7 @@ async function syncStockAndPanel(client, options = {}) {
 async function deleteTicketChannel(channel, order, reasonText, finalStatus = null) {
   try {
     const terminal = new Set(["DONE", "CANCELLED", "INELIGIBLE", "EXPIRED", "CLOSED"]);
+
     if (finalStatus) {
       order.status = finalStatus;
     } else if (!terminal.has(order.status)) {
@@ -968,10 +1181,14 @@ async function deleteTicketChannel(channel, order, reasonText, finalStatus = nul
         await channel.delete("Ticket closed (deleted).");
       } catch (e) {
         console.error("Failed to delete channel:", e);
+
         try {
-          await channel.permissionOverwrites.edit(order.userId, {
-            SendMessages: false,
-          }).catch(() => {});
+          await channel.permissionOverwrites
+            .edit(order.userId, {
+              SendMessages: false,
+            })
+            .catch(() => {});
+
           await channel
             .send("⚠️ Bot gagal menghapus channel (permission). Ticket dikunci sebagai fallback.")
             .catch(() => {});
@@ -983,14 +1200,6 @@ async function deleteTicketChannel(channel, order, reasonText, finalStatus = nul
   }
 }
 
-/**
- * Status auto close:
- * - AWAITING_PAYMENT  -> EXPIRED
- * - AWAITING_PROOF    -> EXPIRED
- * - DONE              -> CLOSED
- * - INELIGIBLE        -> INELIGIBLE (channel ditutup otomatis)
- * - PROOF_SUBMITTED   -> tidak auto close
- */
 async function runAutoCloseSweep(client) {
   const now = Date.now();
 
@@ -1005,6 +1214,7 @@ async function runAutoCloseSweep(client) {
       }
 
       const deadline = new Date(order.autoCloseDeadlineAt).getTime();
+
       if (!Number.isFinite(deadline)) continue;
       if (now < deadline) continue;
 
@@ -1012,11 +1222,14 @@ async function runAutoCloseSweep(client) {
       if (!guild) continue;
 
       const ch = await guild.channels.fetch(order.channelId).catch(() => null);
+
       if (!ch) {
         order.autoCloseEnabled = false;
         order.autoCloseDeadlineAt = null;
+
         orders.set(order.orderId, order);
         saveOrders();
+
         continue;
       }
 
@@ -1044,7 +1257,7 @@ async function runAutoCloseSweep(client) {
           ch,
           order,
           `🔒 Ticket ineligible ditutup otomatis setelah ${AUTO_CLOSE_MINUTES} menit. ` +
-            `Chat atau file yang dikirim tidak memperpanjang waktu ticket ini. Ticket akan dihapus...`,
+            `Ticket akan dihapus...`,
           "INELIGIBLE"
         );
         continue;
@@ -1065,7 +1278,7 @@ async function runAutoCloseSweep(client) {
       await deleteTicketChannel(
         ch,
         order,
-        `🔒 Ticket ditutup otomatis (inactivity ${AUTO_CLOSE_MINUTES} menit). Ticket akan dihapus...`,
+        `🔒 Ticket ditutup otomatis karena tidak ada aktivitas selama ${AUTO_CLOSE_MINUTES} menit. Ticket akan dihapus...`,
         "CLOSED"
       );
 
@@ -1078,6 +1291,7 @@ async function runAutoCloseSweep(client) {
 
 // ========= DISCORD CLIENT =========
 loadOrders();
+loadTagSettings();
 
 const client = new Client({
   intents: [
@@ -1111,13 +1325,36 @@ client.once("ready", async () => {
       .addStringOption((option) =>
         option
           .setName("order")
-          .setDescription("Order ID (contoh: T-12345). Kosongkan jika jalankan di dalam ticket.")
+          .setDescription("Order ID, contoh: T-12345. Kosongkan jika di dalam ticket.")
+          .setRequired(false)
+      )
+      .toJSON(),
+
+    new SlashCommandBuilder()
+      .setName("tagmap")
+      .setDescription("Staff: atur wajib tag map di Display Name Roblox")
+      .addStringOption((option) =>
+        option
+          .setName("aksi")
+          .setDescription("Pilih aksi")
+          .setRequired(true)
+          .addChoices(
+            { name: "status", value: "STATUS" },
+            { name: "aktifkan", value: "AKTIFKAN" },
+            { name: "matikan", value: "MATIKAN" },
+            { name: "ganti keyword", value: "GANTI" }
+          )
+      )
+      .addStringOption((option) =>
+        option
+          .setName("keyword")
+          .setDescription("Keyword baru, contoh: UCVR / ADBM")
           .setRequired(false)
       )
       .toJSON(),
   ]);
 
-  console.log("Slash command /proses registered.");
+  console.log("Slash commands /proses and /tagmap registered.");
 
   await syncStockAndPanel(client, { suppressBroadcast: true });
 
@@ -1189,10 +1426,89 @@ client.on("messageCreate", async (msg) => {
   }
 });
 
+// ========= INTERACTIONS =========
 client.on("interactionCreate", async (i) => {
   try {
+    if (i.isChatInputCommand() && i.commandName === "tagmap") {
+      const member = await i.guild.members.fetch(i.user.id).catch(() => null);
+
+      if (!isStaff(member)) {
+        return i.reply({ content: "Khusus staff/owner.", ephemeral: true });
+      }
+
+      const aksi = i.options.getString("aksi");
+      const keywordInput = i.options.getString("keyword");
+
+      if (aksi === "STATUS") {
+        return i.reply({
+          content:
+            `🏷️ **Status Tag Map**\n` +
+            `Status: **${tagSettings.enabled ? "ON" : "OFF"}**\n` +
+            `Keyword: **${getTagKeywordUpper()}**\n\n` +
+            `Contoh valid: \`${getTagKeywordUpper()}_Aura\`, \`${getTagKeywordUpper()}xAura\`, \`${getTagKeywordLower()}Aura\``,
+          ephemeral: true,
+        });
+      }
+
+      if (aksi === "AKTIFKAN") {
+        tagSettings.enabled = true;
+        saveTagSettings();
+
+        await refreshPanelMessage(client).catch(() => {});
+
+        return i.reply({
+          content:
+            `✅ Wajib tag map di Display Name Roblox sudah **DIATIFKAN**.\n` +
+            `Keyword aktif: **${getTagKeywordUpper()}**`,
+          ephemeral: true,
+        });
+      }
+
+      if (aksi === "MATIKAN") {
+        tagSettings.enabled = false;
+        saveTagSettings();
+
+        await refreshPanelMessage(client).catch(() => {});
+
+        return i.reply({
+          content: "✅ Wajib tag map di Display Name Roblox sudah **DIMATIKAN**.",
+          ephemeral: true,
+        });
+      }
+
+      if (aksi === "GANTI") {
+        const cleanKeyword = normalizeTagKeyword(keywordInput);
+
+        if (!cleanKeyword) {
+          return i.reply({
+            content: "❌ Keyword tidak boleh kosong. Contoh: `/tagmap aksi:ganti keyword keyword:adbm`",
+            ephemeral: true,
+          });
+        }
+
+        tagSettings.keyword = cleanKeyword;
+        saveTagSettings();
+
+        await refreshPanelMessage(client).catch(() => {});
+
+        return i.reply({
+          content:
+            `✅ Keyword tag map berhasil diganti menjadi **${getTagKeywordUpper()}**.\n` +
+            `Status wajib tag map saat ini: **${tagSettings.enabled ? "ON" : "OFF"}**\n\n` +
+            `Contoh valid:\n` +
+            `• ${getTagKeywordUpper()}_Aura\n` +
+            `• ${getTagKeywordUpper()}xAura\n` +
+            `• ${getTagKeywordLower()}Aura`,
+          ephemeral: true,
+        });
+      }
+
+      return i.reply({ content: "Aksi tidak valid.", ephemeral: true });
+    }
+
     if (i.isChatInputCommand() && i.commandName === "proses") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
+
       if (!isStaff(member)) {
         return i.reply({ content: "Khusus staff/owner.", ephemeral: true });
       }
@@ -1206,13 +1522,16 @@ client.on("interactionCreate", async (i) => {
       }
 
       let order = null;
+
       if (orderArg) {
         order = orders.get(orderArg);
+
         if (!order) {
           return i.reply({ content: "Order ID tidak ditemukan.", ephemeral: true });
         }
       } else {
         order = Array.from(orders.values()).find((o) => o.channelId === channelId);
+
         if (!order) {
           return i.reply({
             content: "Command ini harus dipakai di channel ticket, atau isi option order.",
@@ -1229,11 +1548,15 @@ client.on("interactionCreate", async (i) => {
       }
 
       if (order.status !== "PROOF_SUBMITTED" && order.status !== "AWAITING_PROOF") {
-        return i.reply({ content: "Belum ada bukti pembayaran (file/forward).", ephemeral: true });
+        return i.reply({
+          content: "Belum ada bukti pembayaran (file/forward).",
+          ephemeral: true,
+        });
       }
 
       order.status = "DONE";
       order.doneAt = nowIso();
+
       setAutoCloseDeadline(order, AUTO_CLOSE_MINUTES, "staff_done_command");
 
       orders.set(order.orderId, order);
@@ -1245,13 +1568,17 @@ client.on("interactionCreate", async (i) => {
       const tanggal = now.toLocaleDateString("id-ID", { timeZone: "Asia/Jakarta" });
       const jam = now.toLocaleTimeString("id-ID", { timeZone: "Asia/Jakarta" });
 
-      await i.reply({ content: `✅ Proses selesai untuk **${order.orderId}**.`, ephemeral: true });
+      await i.reply({
+        content: `✅ Proses selesai untuk **${order.orderId}**.`,
+        ephemeral: true,
+      });
 
       await i.channel
         .send({
           content:
             `🎉 **ORDER BERHASIL DIKIRIM!** 🎉\n\n` +
             `👤 Username Roblox: \`${order.robloxUsername}\`\n` +
+            `🏷️ Display Name: \`${order.robloxDisplayName || "-"}\`\n` +
             `💎 Total Robux: **${fmtIDR(order.qty)}**\n` +
             `💰 Total Bayar: **Rp ${fmtIDR(order.total)}**\n` +
             `📅 Tanggal: **${tanggal}**\n` +
@@ -1266,8 +1593,10 @@ client.on("interactionCreate", async (i) => {
       await sendTestimoniMessage(client, order, i.user).catch(() => {});
 
       let pdfPath = null;
+
       try {
         pdfPath = await createInvoicePdf(order, i.user);
+
         const fileName = path.basename(pdfPath);
         const invoiceEmbed = buildInvoiceEmbed(order);
 
@@ -1296,6 +1625,7 @@ client.on("interactionCreate", async (i) => {
         });
       } catch (e) {
         console.error("Invoice generate/send error:", e?.stack || e);
+
         await i.channel
           .send(
             `⚠️ Proses selesai, tapi gagal membuat/mengirim invoice PDF.\n**Error:** \`${String(
@@ -1319,6 +1649,7 @@ client.on("interactionCreate", async (i) => {
           ephemeral: true,
         });
       }
+
       return i.showModal(buildOrderModal());
     }
 
@@ -1326,19 +1657,22 @@ client.on("interactionCreate", async (i) => {
       await i.deferReply({ ephemeral: true });
 
       return withOrderCreationLock(async () => {
-        const robloxUsername = i.fields
+        const robloxUsernameInput = i.fields
           .getTextInputValue("roblox_username")
           ?.trim()
           ?.replace(/^@/, "");
+
         const qtyRaw = i.fields.getTextInputValue("qty")?.trim();
         const note = i.fields.getTextInputValue("note")?.trim();
 
         const qty = Number(String(qtyRaw || "").replace(/[^\d]/g, ""));
+
         if (!Number.isFinite(qty) || qty < 1000) {
           return i.editReply("Jumlah minimal 1000.");
         }
+
         if (qty % 1000 !== 0) {
-          return i.editReply("Jumlah harus kelipatan 1000 (contoh: 1000 / 2000 / 3000).");
+          return i.editReply("Jumlah harus kelipatan 1000. Contoh: 1000 / 2000 / 3000.");
         }
 
         await syncStockAndPanel(client).catch(() => {});
@@ -1355,11 +1689,12 @@ client.on("interactionCreate", async (i) => {
         }
 
         let eligibility;
+
         try {
-          eligibility = await checkRobloxGroupEligibility(robloxUsername);
+          eligibility = await checkRobloxGroupEligibility(robloxUsernameInput);
         } catch (e) {
           console.error("Roblox check error:", e);
-          return i.editReply("Gagal cek komunitas Roblox (API). Coba lagi beberapa saat.");
+          return i.editReply("Gagal cek komunitas Roblox/API Roblox. Coba lagi beberapa saat.");
         }
 
         const orderId = newOrderId();
@@ -1369,15 +1704,20 @@ client.on("interactionCreate", async (i) => {
         const user = i.user;
 
         let ticket;
+
         try {
           const ticketName = `ucvr-${orderId}`.toLowerCase();
+
           ticket = await guild.channels.create({
             name: ticketName,
             type: ChannelType.GuildText,
             parent: TICKET_CATEGORY_ID,
-            topic: `UNDERCOVER | ${orderId} | User: ${user.id} | Roblox: ${robloxUsername}`,
+            topic: `UNDERCOVER | ${orderId} | User: ${user.id} | Roblox: ${robloxUsernameInput}`,
             permissionOverwrites: [
-              { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+              {
+                id: guild.id,
+                deny: [PermissionsBitField.Flags.ViewChannel],
+              },
               {
                 id: client.user.id,
                 allow: [
@@ -1412,8 +1752,9 @@ client.on("interactionCreate", async (i) => {
           });
         } catch (e) {
           console.error("Ticket create error:", e);
+
           return i.editReply(
-            "Gagal membuat ticket. Cek permission bot di **Category Ticket** (Manage Channels, View Channel, Send Messages)."
+            "Gagal membuat ticket. Cek permission bot di **Category Ticket**: Manage Channels, View Channel, Send Messages."
           );
         }
 
@@ -1423,12 +1764,18 @@ client.on("interactionCreate", async (i) => {
           channelId: ticket.id,
           userId: user.id,
 
-          robloxUsername,
+          robloxUsername: eligibility.robloxUsername || robloxUsernameInput,
+          robloxDisplayName: eligibility.robloxDisplayName || "-",
           robloxUserId: eligibility.userId ?? null,
           robloxJoinTime: eligibility.joinTime ?? null,
           robloxDaysInGroup: eligibility.daysInGroup ?? 0,
           robloxEligible: Boolean(eligibility.ok),
           ineligibleReason: eligibility.ok ? null : eligibility.reason,
+          failType: eligibility.failType || null,
+
+          tagRequired: tagSettings.enabled,
+          tagKeyword: tagSettings.keyword,
+          tagValid: eligibility.tagValid ?? !tagSettings.enabled,
 
           qty,
           total,
@@ -1468,7 +1815,8 @@ client.on("interactionCreate", async (i) => {
             .send({
               content:
                 `Halo <@${user.id}> 👋\nKamu **belum memenuhi syarat** untuk order.\n` +
-                `⏳ Ticket ini akan auto close dalam **${AUTO_CLOSE_MINUTES} menit** walaupun ada chat atau file yang dikirim.`,
+                `⏳ Ticket ini akan auto close dalam **${AUTO_CLOSE_MINUTES} menit**.\n\n` +
+                `Kalau syarat sudah diperbaiki, klik tombol **🔁 Order Robux Ulang** di bawah.`,
               embeds: [statusEmbed],
               components: buildCustomerButtonsIneligible(orderId),
             })
@@ -1494,20 +1842,59 @@ client.on("interactionCreate", async (i) => {
       "ob_copy_username",
       "ob_close_ticket",
       "ob_copy_bank",
+      "ob_order_retry",
     ];
 
     if (needsOrder.includes(key)) {
-      if (!order) return i.reply({ content: "Order tidak ditemukan.", ephemeral: true });
-      if (i.channelId !== order.channelId) {
-        return i.reply({ content: "Tombol ini hanya valid di ticket ini.", ephemeral: true });
+      if (!order) {
+        return i.reply({
+          content: "Order tidak ditemukan.",
+          ephemeral: true,
+        });
       }
+
+      if (i.channelId !== order.channelId) {
+        return i.reply({
+          content: "Tombol ini hanya valid di ticket ini.",
+          ephemeral: true,
+        });
+      }
+    }
+
+    if (key === "ob_order_retry") {
+      const member = await i.guild.members.fetch(i.user.id).catch(() => null);
+      const allowed = i.user.id === order.userId || isStaff(member);
+
+      if (!allowed) {
+        return i.reply({
+          content: "Kamu tidak punya akses untuk order ini.",
+          ephemeral: true,
+        });
+      }
+
+      await syncStockAndPanel(client).catch(() => {});
+
+      if (!isStockReady()) {
+        return i.reply({
+          content:
+            "⛔ Stok Robux sedang **HABIS**.\n" +
+            "Silakan tunggu update stok ready, lalu klik tombol ini lagi.",
+          ephemeral: true,
+        });
+      }
+
+      return i.showModal(buildOrderModal());
     }
 
     if (key === "ob_copy_username") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
       const allowed = i.user.id === order.userId || isStaff(member);
+
       if (!allowed) {
-        return i.reply({ content: "Kamu tidak punya akses untuk order ini.", ephemeral: true });
+        return i.reply({
+          content: "Kamu tidak punya akses untuk order ini.",
+          ephemeral: true,
+        });
       }
 
       return i.reply({
@@ -1519,8 +1906,12 @@ client.on("interactionCreate", async (i) => {
     if (key === "ob_copy_bank") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
       const allowed = i.user.id === order.userId || isStaff(member);
+
       if (!allowed) {
-        return i.reply({ content: "Kamu tidak punya akses untuk order ini.", ephemeral: true });
+        return i.reply({
+          content: "Kamu tidak punya akses untuk order ini.",
+          ephemeral: true,
+        });
       }
 
       return i.reply({
@@ -1531,17 +1922,26 @@ client.on("interactionCreate", async (i) => {
 
     if (key === "ob_bank") {
       if (!order.robloxEligible) {
-        return i.reply({ content: "Order ini tidak eligible.", ephemeral: true });
+        return i.reply({
+          content: "Order ini tidak eligible.",
+          ephemeral: true,
+        });
       }
 
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
       const allowed = i.user.id === order.userId || isStaff(member);
+
       if (!allowed) {
-        return i.reply({ content: "Kamu tidak punya akses untuk order ini.", ephemeral: true });
+        return i.reply({
+          content: "Kamu tidak punya akses untuk order ini.",
+          ephemeral: true,
+        });
       }
 
       order.status = "AWAITING_PROOF";
+
       setAutoCloseDeadline(order, AUTO_CLOSE_MINUTES, "bank_transfer_clicked");
+
       orders.set(order.orderId, order);
       saveOrders();
 
@@ -1555,17 +1955,22 @@ client.on("interactionCreate", async (i) => {
       await i.channel
         .send(
           `📌 Setelah transfer, kirim **bukti pembayaran (file apapun / gambar / dokumen / forward)** di sini. ` +
-            `Jika dalam **${AUTO_CLOSE_MINUTES} menit** tidak kirim bukti pembayaran, order akan di close (expired) otomatis.`
+            `Jika dalam **${AUTO_CLOSE_MINUTES} menit** tidak kirim bukti pembayaran, order akan di close otomatis.`
         )
         .catch(() => {});
+
       return;
     }
 
     if (key === "ob_cancel_user") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
       const allowed = i.user.id === order.userId || isStaff(member);
+
       if (!allowed) {
-        return i.reply({ content: "Kamu tidak punya akses untuk order ini.", ephemeral: true });
+        return i.reply({
+          content: "Kamu tidak punya akses untuk order ini.",
+          ephemeral: true,
+        });
       }
 
       if (order.status === "DONE") {
@@ -1586,16 +1991,30 @@ client.on("interactionCreate", async (i) => {
 
       await syncStockAndPanel(client).catch(() => {});
 
-      await i.reply({ content: "❌ Order ditutup. Ticket akan dihapus dalam 3 detik...", ephemeral: true });
-      await deleteTicketChannel(i.channel, order, "❌ Order ditutup oleh user. Ticket akan dihapus...", "CANCELLED");
+      await i.reply({
+        content: "❌ Order ditutup. Ticket akan dihapus dalam 3 detik...",
+        ephemeral: true,
+      });
+
+      await deleteTicketChannel(
+        i.channel,
+        order,
+        "❌ Order ditutup oleh user. Ticket akan dihapus...",
+        "CANCELLED"
+      );
+
       return;
     }
 
     if (key === "ob_close_ticket") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
       const allowed = i.user.id === order.userId || isStaff(member);
+
       if (!allowed) {
-        return i.reply({ content: "Kamu tidak punya akses untuk ticket ini.", ephemeral: true });
+        return i.reply({
+          content: "Kamu tidak punya akses untuk ticket ini.",
+          ephemeral: true,
+        });
       }
 
       if (order.status !== "DONE" && !isStaff(member)) {
@@ -1605,18 +2024,27 @@ client.on("interactionCreate", async (i) => {
         });
       }
 
-      await i.reply({ content: "🔒 Ticket akan dihapus dalam 3 detik...", ephemeral: true });
+      await i.reply({
+        content: "🔒 Ticket akan dihapus dalam 3 detik...",
+        ephemeral: true,
+      });
+
       await deleteTicketChannel(i.channel, order, "🔒 Ticket ditutup. Ticket akan dihapus...", "CLOSED");
 
       await syncStockAndPanel(client).catch(() => {});
+
       return;
     }
 
     if (key === "ob_close_ineligible") {
       const member = await i.guild.members.fetch(i.user.id).catch(() => null);
       const allowed = i.user.id === order.userId || isStaff(member);
+
       if (!allowed) {
-        return i.reply({ content: "Kamu tidak punya akses untuk ticket ini.", ephemeral: true });
+        return i.reply({
+          content: "Kamu tidak punya akses untuk ticket ini.",
+          ephemeral: true,
+        });
       }
 
       order.status = "CLOSED";
@@ -1630,16 +2058,33 @@ client.on("interactionCreate", async (i) => {
 
       await syncStockAndPanel(client).catch(() => {});
 
-      await i.reply({ content: "🔒 Ticket akan dihapus dalam 3 detik...", ephemeral: true });
-      await deleteTicketChannel(i.channel, order, "🔒 Ticket ditutup (ineligible). Ticket akan dihapus...", "CLOSED");
+      await i.reply({
+        content: "🔒 Ticket akan dihapus dalam 3 detik...",
+        ephemeral: true,
+      });
+
+      await deleteTicketChannel(
+        i.channel,
+        order,
+        "🔒 Ticket ditutup (ineligible). Ticket akan dihapus...",
+        "CLOSED"
+      );
+
       return;
     }
   } catch (e) {
     console.error("interaction error:", e?.stack || e);
+
     if (i.deferred || i.replied) {
-      await i.followUp({ content: "Terjadi error. Coba lagi.", ephemeral: true }).catch(() => {});
+      await i.followUp({
+        content: "Terjadi error. Coba lagi.",
+        ephemeral: true,
+      }).catch(() => {});
     } else {
-      await i.reply({ content: "Terjadi error. Coba lagi.", ephemeral: true }).catch(() => {});
+      await i.reply({
+        content: "Terjadi error. Coba lagi.",
+        ephemeral: true,
+      }).catch(() => {});
     }
   }
 });
