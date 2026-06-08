@@ -924,19 +924,19 @@ function buildOrderModal() {
 
   const username = new TextInputBuilder()
     .setCustomId("roblox_username")
-    .setLabel("Username Roblox (tanpa @ dan bukan Display Name)")
+    .setLabel("Username Roblox, bukan Display Name")
     .setStyle(TextInputStyle.Short)
     .setRequired(true);
 
   const qty = new TextInputBuilder()
     .setCustomId("qty")
-    .setLabel("Jumlah (min.1000 dan kelipatan 1000)")
+    .setLabel("Jumlah, minimal 1000 dan kelipatan 1000")
     .setStyle(TextInputStyle.Short)
     .setRequired(true);
 
   const note = new TextInputBuilder()
     .setCustomId("note")
-    .setLabel("Catatan (opsional)")
+    .setLabel("Catatan tambahan, opsional")
     .setStyle(TextInputStyle.Paragraph)
     .setRequired(false);
 
@@ -1833,42 +1833,46 @@ client.on("interactionCreate", async (i) => {
     }
 
     if (i.isButton() && i.customId === "ob_order_open_modal") {
-  if (!isOrderOpen()) {
-    return i.reply({
-      content: buildOrderClosedMessage(),
-      ephemeral: true,
-    });
-  }
+      await syncStockAndPanel(client).catch(() => {});
 
-  if (!isStockReady()) {
-    return i.reply({
-      content: `⛔ Stock HABIS.\nStatus stok saat ini: **HABIS**`,
-      ephemeral: true,
-    });
-  }
+      if (!isOrderOpen()) {
+        return i.reply({
+          content: buildOrderClosedMessage(),
+          ephemeral: true,
+        });
+      }
 
-  return i.showModal(buildOrderModal());
-}
+      if (!isStockReady()) {
+        return i.reply({
+          content: `⛔ Stock HABIS.\nStatus stok saat ini: **HABIS**`,
+          ephemeral: true,
+        });
+      }
+
+      return i.showModal(buildOrderModal());
+    }
 
     if (i.isButton() && i.customId === "ob_order_retry_panel") {
-  if (!isOrderOpen()) {
-    return i.reply({
-      content: buildOrderClosedMessage(),
-      ephemeral: true,
-    });
-  }
+      await syncStockAndPanel(client).catch(() => {});
 
-  if (!isStockReady()) {
-    return i.reply({
-      content:
-        "⛔ Stok Robux sedang **HABIS**.\n" +
-        "Silakan tunggu update stok ready, lalu klik tombol order lagi.",
-      ephemeral: true,
-    });
-  }
+      if (!isOrderOpen()) {
+        return i.reply({
+          content: buildOrderClosedMessage(),
+          ephemeral: true,
+        });
+      }
 
-  return i.showModal(buildOrderModal());
-}
+      if (!isStockReady()) {
+        return i.reply({
+          content:
+            "⛔ Stok Robux sedang **HABIS**.\n" +
+            "Silakan tunggu update stok ready, lalu klik tombol order lagi.",
+          ephemeral: true,
+        });
+      }
+
+      return i.showModal(buildOrderModal());
+    }
 
     if (i.isModalSubmit() && i.customId === "ob_order_modal_submit") {
       await i.deferReply({ ephemeral: true });
