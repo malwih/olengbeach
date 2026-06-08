@@ -1097,15 +1097,12 @@ function buildRedeployStockBroadcastEmbed() {
         "",
         `📌 **Status Order:** ${orderStatus}`,
         `📦 **Status Stok:** ${stockStatus}`,
-        `💰 **Group Funds:** ${stockCache.ok ? `${fmtIDR(stockCache.groupFunds)} Robux` : "-"}`,
-        `🔒 **Reserved Order:** ${stockCache.ok ? `${fmtIDR(stockCache.reserved)} Robux` : "-"}`,
-        `✅ **Available:** ${stockCache.ok ? `${fmtIDR(stockCache.available)} Robux` : "-"}`,
         "",
         stockCache.ok
           ? isOrderOpen() && isStockReady()
             ? `🛒 Customer bisa order di <#${PANEL_CHANNEL_ID}>.`
             : isOrderOpen() && !isStockReady()
-              ? "⛔ Order masih OPEN, tapi stok belum cukup untuk order minimal 1.000 Robux."
+              ? "⛔ Order masih OPEN, tapi stok belum ready."
               : "🔒 Order sedang CLOSE manual. Tombol order dimatikan."
           : `⚠️ Gagal cek stok Roblox: ${stockCache.error || "Unknown error"}`,
       ].join("\n")
@@ -1130,14 +1127,11 @@ function buildOrderManualBroadcastEmbed(aksi, staffUser) {
         `👮 **Staff:** ${staffUser ? `<@${staffUser.id}>` : "-"}`,
         `📌 **Status Order:** ${isOrderOpen() ? "OPEN" : "CLOSE"}`,
         `📦 **Status Stok:** ${stockStatus}`,
-        `💰 **Group Funds:** ${stockCache.ok ? `${fmtIDR(stockCache.groupFunds)} Robux` : "-"}`,
-        `🔒 **Reserved Order:** ${stockCache.ok ? `${fmtIDR(stockCache.reserved)} Robux` : "-"}`,
-        `✅ **Available:** ${stockCache.ok ? `${fmtIDR(stockCache.available)} Robux` : "-"}`,
         "",
         isOpenAction
           ? isStockReady()
             ? `🛒 Customer bisa langsung order di <#${PANEL_CHANNEL_ID}>.`
-            : "⚠️ Order sudah OPEN, tapi stok belum cukup untuk order minimal 1.000 Robux."
+            : "⚠️ Order sudah OPEN, tapi stok belum ready."
           : "📌 Tombol order dimatikan meskipun payout Roblox ready.",
       ].join("\n")
     )
