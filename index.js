@@ -1833,46 +1833,42 @@ client.on("interactionCreate", async (i) => {
     }
 
     if (i.isButton() && i.customId === "ob_order_open_modal") {
-      await syncStockAndPanel(client).catch(() => {});
+  if (!isOrderOpen()) {
+    return i.reply({
+      content: buildOrderClosedMessage(),
+      ephemeral: true,
+    });
+  }
 
-      if (!isOrderOpen()) {
-        return i.reply({
-          content: buildOrderClosedMessage(),
-          ephemeral: true,
-        });
-      }
+  if (!isStockReady()) {
+    return i.reply({
+      content: `⛔ Stock HABIS.\nStatus stok saat ini: **HABIS**`,
+      ephemeral: true,
+    });
+  }
 
-      if (!isStockReady()) {
-        return i.reply({
-          content: `⛔ Stock HABIS.\nStatus stok saat ini: **HABIS**`,
-          ephemeral: true,
-        });
-      }
-
-      return i.showModal(buildOrderModal());
-    }
+  return i.showModal(buildOrderModal());
+}
 
     if (i.isButton() && i.customId === "ob_order_retry_panel") {
-      await syncStockAndPanel(client).catch(() => {});
+  if (!isOrderOpen()) {
+    return i.reply({
+      content: buildOrderClosedMessage(),
+      ephemeral: true,
+    });
+  }
 
-      if (!isOrderOpen()) {
-        return i.reply({
-          content: buildOrderClosedMessage(),
-          ephemeral: true,
-        });
-      }
+  if (!isStockReady()) {
+    return i.reply({
+      content:
+        "⛔ Stok Robux sedang **HABIS**.\n" +
+        "Silakan tunggu update stok ready, lalu klik tombol order lagi.",
+      ephemeral: true,
+    });
+  }
 
-      if (!isStockReady()) {
-        return i.reply({
-          content:
-            "⛔ Stok Robux sedang **HABIS**.\n" +
-            "Silakan tunggu update stok ready, lalu klik tombol order lagi.",
-          ephemeral: true,
-        });
-      }
-
-      return i.showModal(buildOrderModal());
-    }
+  return i.showModal(buildOrderModal());
+}
 
     if (i.isModalSubmit() && i.customId === "ob_order_modal_submit") {
       await i.deferReply({ ephemeral: true });
